@@ -64,19 +64,32 @@ class Neo4jClient:
             logger.error("Unexpected Neo4j connection error", error=str(e), uri=config.database.neo4j_uri)
             raise Neo4jError(error_msg)
     
-    async def _connect_with_fallback(self) -> None:
-        """Fallback connection method with custom SSL context for Neo4j cloud."""
-        logger.info("Attempting fallback connection with custom SSL context")
-        
-        # Create custom SSL context that ignores certificate verification
-        # This is safe for Neo4j cloud instances with self-signed certificates
+    def _create_ssl_context(self) -> tuple:
+        """Create SSL context and fallback URI for Neo4j cloud connections."""
         import ssl
         ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        # For Neo4j Aura, we can safely disable hostname verification
+        # but keep certificate verification enabled for security
+        if "databases.neo4j.io" in config.database.neo4j_uri:
+            ssl_context.check_hostname = False  # Neo4j Aura uses different hostnames
+            ssl_context.verify_mode = ssl.CERT_REQUIRED  # Keep certificate verification enabled
+            logger.info("Using Neo4j Aura SSL configuration with certificate verification")
+        else:
+            # For other cloud instances, use full verification
+            ssl_context.verify_mode = ssl.CERT_REQUIRED
+            logger.info("Using full SSL verification for custom Neo4j instance")
         
         # Convert bolt+s:// to bolt:// and use custom SSL context
         fallback_uri = config.database.neo4j_uri.replace('+s://', '://')
+        
+        return ssl_context, fallback_uri
+
+    async def _connect_with_fallback(self) -> None:
+        """Fallback connection method with secure SSL context for Neo4j cloud."""
+        logger.info("Attempting fallback connection with custom SSL context")
+        
+        ssl_context, fallback_uri = self._create_ssl_context()
         logger.info(f"Using custom SSL context for: {fallback_uri}")
         
         fallback_config = {
@@ -96,7 +109,7 @@ class Neo4jClient:
         # Test connection
         await self._driver.verify_connectivity()
         logger.info("Connected using custom SSL context for Neo4j cloud")
-        logger.info("SSL encryption is active with certificate verification bypassed")
+        logger.info("SSL encryption is active with certificate verification enabled")
     
     def connect_sync(self) -> None:
         """Establish synchronous connection to Neo4j database."""
@@ -143,18 +156,10 @@ class Neo4jClient:
             raise Neo4jError(error_msg)
     
     def _connect_sync_with_fallback(self) -> None:
-        """Fallback synchronous connection method with custom SSL context for Neo4j cloud."""
+        """Fallback synchronous connection method with secure SSL context for Neo4j cloud."""
         logger.info("Attempting fallback connection with custom SSL context (sync)")
         
-        # Create custom SSL context that ignores certificate verification
-        # This is safe for Neo4j cloud instances with self-signed certificates
-        import ssl
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-        
-        # Convert bolt+s:// to bolt:// and use custom SSL context
-        fallback_uri = config.database.neo4j_uri.replace('+s://', '://')
+        ssl_context, fallback_uri = self._create_ssl_context()
         logger.info(f"Using custom SSL context for (sync): {fallback_uri}")
         
         fallback_config = {
@@ -174,7 +179,7 @@ class Neo4jClient:
         # Test connection
         self._sync_driver.verify_connectivity()
         logger.info("Connected using custom SSL context for Neo4j cloud (sync)")
-        logger.info("SSL encryption is active with certificate verification bypassed")
+        logger.info("SSL encryption is active with certificate verification enabled")
     
     async def close(self) -> None:
         """Close database connection."""
