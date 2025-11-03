@@ -4,7 +4,8 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from pydantic import BaseSettings, Field
+from pydantic import Field
+from pydantic_settings import BaseSettings
 
 
 class DatabaseConfig(BaseSettings):
@@ -17,9 +18,11 @@ class DatabaseConfig(BaseSettings):
     neo4j_database: str = Field(default="neo4j", env="NEO4J_DATABASE")
     
     # Supabase Configuration
-    supabase_url: str = Field(env="SUPABASE_URL")
-    supabase_key: str = Field(env="SUPABASE_ANON_KEY")
+    supabase_url: Optional[str] = Field(default=None, env="SUPABASE_URL")
+    supabase_key: Optional[str] = Field(default=None, env="SUPABASE_ANON_KEY")
     supabase_service_key: Optional[str] = Field(default=None, env="SUPABASE_SERVICE_KEY")
+    
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 class AppConfig(BaseSettings):
@@ -45,9 +48,7 @@ class AppConfig(BaseSettings):
     cache_ttl_seconds: int = Field(default=3600, env="CACHE_TTL_SECONDS")
     max_repository_size_mb: int = Field(default=1000, env="MAX_REPOSITORY_SIZE_MB")
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 class Config:

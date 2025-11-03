@@ -23,6 +23,9 @@ class Neo4jClient:
     async def connect(self) -> None:
         """Establish connection to Neo4j database."""
         try:
+            logger.info("Attempting to connect to Neo4j", uri=config.database.neo4j_uri)
+            
+            # Create driver with basic configuration
             self._driver = AsyncGraphDatabase.driver(
                 config.database.neo4j_uri,
                 auth=(config.database.neo4j_user, config.database.neo4j_password)
@@ -30,15 +33,27 @@ class Neo4jClient:
             
             # Test connection
             await self._driver.verify_connectivity()
-            logger.info("Connected to Neo4j database", uri=config.database.neo4j_uri)
+            logger.info("Successfully connected to Neo4j database", uri=config.database.neo4j_uri)
             
-        except (ServiceUnavailable, AuthError) as e:
-            logger.error("Failed to connect to Neo4j", error=str(e))
-            raise Neo4jError(f"Failed to connect to Neo4j: {e}")
+        except ServiceUnavailable as e:
+            error_msg = f"Neo4j service unavailable. Please check if the database is running and accessible. Error: {e}"
+            logger.error("Neo4j service unavailable", error=str(e), uri=config.database.neo4j_uri)
+            raise Neo4jError(error_msg)
+        except AuthError as e:
+            error_msg = f"Neo4j authentication failed. Please check username and password. Error: {e}"
+            logger.error("Neo4j authentication failed", error=str(e), uri=config.database.neo4j_uri)
+            raise Neo4jError(error_msg)
+        except Exception as e:
+            error_msg = f"Unexpected error connecting to Neo4j: {e}"
+            logger.error("Unexpected Neo4j connection error", error=str(e), uri=config.database.neo4j_uri)
+            raise Neo4jError(error_msg)
     
     def connect_sync(self) -> None:
         """Establish synchronous connection to Neo4j database."""
         try:
+            logger.info("Attempting to connect to Neo4j (sync)", uri=config.database.neo4j_uri)
+            
+            # Create driver with basic configuration
             self._sync_driver = GraphDatabase.driver(
                 config.database.neo4j_uri,
                 auth=(config.database.neo4j_user, config.database.neo4j_password)
@@ -46,11 +61,20 @@ class Neo4jClient:
             
             # Test connection
             self._sync_driver.verify_connectivity()
-            logger.info("Connected to Neo4j database (sync)", uri=config.database.neo4j_uri)
+            logger.info("Successfully connected to Neo4j database (sync)", uri=config.database.neo4j_uri)
             
-        except (ServiceUnavailable, AuthError) as e:
-            logger.error("Failed to connect to Neo4j (sync)", error=str(e))
-            raise Neo4jError(f"Failed to connect to Neo4j: {e}")
+        except ServiceUnavailable as e:
+            error_msg = f"Neo4j service unavailable. Please check if the database is running and accessible. Error: {e}"
+            logger.error("Neo4j service unavailable (sync)", error=str(e), uri=config.database.neo4j_uri)
+            raise Neo4jError(error_msg)
+        except AuthError as e:
+            error_msg = f"Neo4j authentication failed. Please check username and password. Error: {e}"
+            logger.error("Neo4j authentication failed (sync)", error=str(e), uri=config.database.neo4j_uri)
+            raise Neo4jError(error_msg)
+        except Exception as e:
+            error_msg = f"Unexpected error connecting to Neo4j: {e}"
+            logger.error("Unexpected Neo4j connection error (sync)", error=str(e), uri=config.database.neo4j_uri)
+            raise Neo4jError(error_msg)
     
     async def close(self) -> None:
         """Close database connection."""
