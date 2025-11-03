@@ -5,10 +5,12 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from ..database.neo4j_client import Neo4jClient
 from ..git.repository import GitRepository
 from ..logging import get_logger
 from .base import BaseAgent, AgentConfig, PromptTemplate
 from .state import AgentState, AgentFinding, Citation
+from .tools import Neo4jTool, GitTool
 
 
 logger = get_logger(__name__)
@@ -17,7 +19,7 @@ logger = get_logger(__name__)
 class VerificationAgent(BaseAgent):
     """Agent responsible for independent validation of findings against source data."""
     
-    def __init__(self, config: Optional[AgentConfig] = None, **kwargs):
+    def __init__(self, config: Optional[AgentConfig] = None, neo4j_client: Optional[Neo4jClient] = None, **kwargs):
         """Initialize the Verification Agent."""
         if config is None:
             config = AgentConfig(
@@ -25,6 +27,11 @@ class VerificationAgent(BaseAgent):
                 description="Validates findings against actual source code and git history"
             )
         super().__init__(config, **kwargs)
+        
+        # Initialize tools for independent validation
+        self.neo4j_client = neo4j_client
+        self.neo4j_tool = Neo4jTool(neo4j_client) if neo4j_client else None
+        self.git_tool = GitTool()
         
         # Register verification templates
         self._register_templates()
@@ -388,7 +395,7 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
         git_repo: Optional[GitRepository],
         repository_path: str
     ) -> Dict[str, Any]:
-        """INDEPENDENTLY validate content claims against actual repository data."""
+        """INDEPENDENTLY validate content claims against actual repository data using Neo4j and Git."""
         content_validation = {
             "claims_validated": 0,
             "claims_failed": 0,
@@ -397,17 +404,19 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
         }
         
         try:
-            # Extract specific factual claims from the finding content
-            claims = self._extract_factual_claims(finding)
+            # Extract specific claims that can be validated against Neo4j CPG and Git
+            claims = await self._extract_verifiable_claims(finding)
             
             for claim in claims:
-                claim_validation = await self._independently_validate_claim(claim, git_repo, repository_path)
+                claim_validation = await self._validate_claim_independently(claim, git_repo, repository_path)
                 content_validation["validation_details"].append(claim_validation)
                 
                 if claim_validation["verified"]:
                     content_validation["claims_validated"] += 1
                 else:
                     content_validation["claims_failed"] += 1
+                    # Add uncertainty to state for failed validations
+                    await self._add_validation_uncertainty(finding, claim, claim_validation)
                     
         except Exception as e:
             self.logger.error(f"Content validation failed: {str(e)}")
@@ -420,24 +429,200 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
             
         return content_validation
         
-    def _extract_factual_claims(self, finding: AgentFinding) -> List[Dict[str, Any]]:
-        """Extract specific factual claims that can be independently verified."""
+    async def _extract_verifiable_claims(self, finding: AgentFinding) -> List[Dict[str, Any]]:
+        """Extract specific claims that can be verified against Neo4j CPG and Git."""
         claims = []
-        content = finding.content.lower()
         
-        # Historian claims to validate
-        if finding.agent_name == "historian":
-            claims.extend(self._extract_historian_claims(finding))
-            
-        # Analyst claims to validate  
-        elif finding.agent_name == "analyst":
-            claims.extend(self._extract_analyst_claims(finding))
-            
-        # Synthesizer claims to validate
-        elif finding.agent_name == "synthesizer":
-            claims.extend(self._extract_synthesizer_claims(finding))
+        # Extract claims based on finding type and content
+        if finding.finding_type == "code_element_changed":
+            claims.extend(await self._extract_code_change_claims(finding))
+        elif finding.finding_type == "dependency_changed":
+            claims.extend(await self._extract_dependency_claims(finding))
+        elif finding.finding_type == "commit_message_intent":
+            claims.extend(await self._extract_commit_intent_claims(finding))
+        elif finding.finding_type == "function_analysis":
+            claims.extend(await self._extract_function_claims(finding))
+        elif finding.finding_type == "structural_analysis":
+            claims.extend(await self._extract_structural_claims(finding))
+        else:
+            # Generic claim extraction for other finding types
+            claims.extend(await self._extract_generic_claims(finding))
             
         return claims
+        
+    async def _extract_code_change_claims(self, finding: AgentFinding) -> List[Dict[str, Any]]:
+        """Extract claims about code element changes."""
+        claims = []
+        content = finding.content
+        
+        # Pattern: "Function foo was modified in commit abc123"
+        function_change_pattern = r'(?:function|method)\s+(\w+)\s+(?:was\s+)?(?:modified|changed|updated)\s+(?:in\s+)?commit\s+([a-f0-9]{7,40})'
+        matches = re.finditer(function_change_pattern, content.lower())
+        
+        for match in matches:
+            function_name = match.group(1)
+            commit_sha = match.group(2)
+            claims.append({
+                "type": "code_element_changed",
+                "element_type": "Function",
+                "element_name": function_name,
+                "commit_sha": commit_sha,
+                "claim": f"Function {function_name} was modified in commit {commit_sha}",
+                "validation_method": "neo4j_cpg_query"
+            })
+            
+        # Pattern: "Class Bar was added in commit def456"
+        class_change_pattern = r'(?:class)\s+(\w+)\s+(?:was\s+)?(?:added|created|introduced)\s+(?:in\s+)?commit\s+([a-f0-9]{7,40})'
+        matches = re.finditer(class_change_pattern, content.lower())
+        
+        for match in matches:
+            class_name = match.group(1)
+            commit_sha = match.group(2)
+            claims.append({
+                "type": "code_element_changed",
+                "element_type": "Class",
+                "element_name": class_name,
+                "commit_sha": commit_sha,
+                "claim": f"Class {class_name} was added in commit {commit_sha}",
+                "validation_method": "neo4j_cpg_query"
+            })
+            
+        return claims
+        
+    async def _extract_dependency_claims(self, finding: AgentFinding) -> List[Dict[str, Any]]:
+        """Extract claims about dependency changes."""
+        claims = []
+        content = finding.content
+        
+        # Pattern: "Function foo now calls function bar"
+        call_pattern = r'(?:function|method)\s+(\w+)\s+(?:now\s+)?(?:calls|invokes)\s+(?:function|method)?\s*(\w+)'
+        matches = re.finditer(call_pattern, content.lower())
+        
+        for match in matches:
+            caller = match.group(1)
+            callee = match.group(2)
+            claims.append({
+                "type": "dependency_changed",
+                "caller": caller,
+                "callee": callee,
+                "relationship": "CALLS",
+                "claim": f"Function {caller} calls function {callee}",
+                "validation_method": "neo4j_relationship_query"
+            })
+            
+        # Pattern: "Module A imports module B"
+        import_pattern = r'(?:module|class)\s+(\w+)\s+(?:imports|uses)\s+(?:module|class)?\s*(\w+)'
+        matches = re.finditer(import_pattern, content.lower())
+        
+        for match in matches:
+            importer = match.group(1)
+            imported = match.group(2)
+            claims.append({
+                "type": "dependency_changed",
+                "caller": importer,
+                "callee": imported,
+                "relationship": "IMPORTS",
+                "claim": f"Module {importer} imports module {imported}",
+                "validation_method": "neo4j_relationship_query"
+            })
+            
+        return claims
+        
+    async def _extract_commit_intent_claims(self, finding: AgentFinding) -> List[Dict[str, Any]]:
+        """Extract claims about commit message intent."""
+        claims = []
+        content = finding.content
+        
+        # Pattern: "This change was to fix 'bug #123'"
+        bug_fix_pattern = r'(?:fix|fixes|fixed)\s+(?:bug\s+)?[#]?(\d+)'
+        matches = re.finditer(bug_fix_pattern, content.lower())
+        
+        for match in matches:
+            bug_number = match.group(1)
+            # Extract commit SHA from metadata or content
+            commit_sha = finding.metadata.get("commit_sha") or self._extract_commit_sha_from_content(content)
+            if commit_sha:
+                claims.append({
+                    "type": "commit_message_intent",
+                    "commit_sha": commit_sha,
+                    "intent": f"bug #{bug_number}",
+                    "claim": f"Commit {commit_sha} was to fix bug #{bug_number}",
+                    "validation_method": "git_commit_message_check"
+                })
+                
+        return claims
+        
+    async def _extract_function_claims(self, finding: AgentFinding) -> List[Dict[str, Any]]:
+        """Extract claims about function analysis."""
+        claims = []
+        content = finding.content
+        
+        # Pattern: "Function exists at line X in file Y"
+        function_location_pattern = r'(?:function|method)\s+(\w+)\s+(?:exists|is located|found)\s+(?:at\s+)?(?:line\s+)?(\d+)\s+(?:in\s+)?(?:file\s+)?([^\s,]+)'
+        matches = re.finditer(function_location_pattern, content.lower())
+        
+        for match in matches:
+            function_name = match.group(1)
+            line_number = int(match.group(2))
+            file_path = match.group(3)
+            claims.append({
+                "type": "function_location",
+                "function_name": function_name,
+                "line_number": line_number,
+                "file_path": file_path,
+                "claim": f"Function {function_name} exists at line {line_number} in {file_path}",
+                "validation_method": "neo4j_function_location_query"
+            })
+            
+        return claims
+        
+    async def _extract_structural_claims(self, finding: AgentFinding) -> List[Dict[str, Any]]:
+        """Extract claims about structural analysis."""
+        claims = []
+        content = finding.content
+        
+        # Pattern: "Class X inherits from class Y"
+        inheritance_pattern = r'(?:class)\s+(\w+)\s+(?:inherits from|extends)\s+(?:class\s+)?(\w+)'
+        matches = re.finditer(inheritance_pattern, content.lower())
+        
+        for match in matches:
+            child_class = match.group(1)
+            parent_class = match.group(2)
+            claims.append({
+                "type": "inheritance_relationship",
+                "child_class": child_class,
+                "parent_class": parent_class,
+                "claim": f"Class {child_class} inherits from class {parent_class}",
+                "validation_method": "neo4j_inheritance_query"
+            })
+            
+        return claims
+        
+    async def _extract_generic_claims(self, finding: AgentFinding) -> List[Dict[str, Any]]:
+        """Extract generic verifiable claims."""
+        claims = []
+        content = finding.content
+        
+        # Extract commit SHAs mentioned in content
+        commit_pattern = r'commit\s+([a-f0-9]{7,40})'
+        matches = re.finditer(commit_pattern, content.lower())
+        
+        for match in matches:
+            commit_sha = match.group(1)
+            claims.append({
+                "type": "commit_existence",
+                "commit_sha": commit_sha,
+                "claim": f"Commit {commit_sha} exists in repository",
+                "validation_method": "git_commit_existence_check"
+            })
+            
+        return claims
+        
+    def _extract_commit_sha_from_content(self, content: str) -> Optional[str]:
+        """Extract commit SHA from content."""
+        commit_pattern = r'commit\s+([a-f0-9]{7,40})'
+        match = re.search(commit_pattern, content.lower())
+        return match.group(1) if match else None
         
     def _extract_historian_claims(self, finding: AgentFinding) -> List[Dict[str, Any]]:
         """Extract verifiable claims from historian findings."""
@@ -531,48 +716,403 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
             
         return claims
         
-    async def _independently_validate_claim(
+    async def _validate_claim_independently(
         self, 
         claim: Dict[str, Any], 
         git_repo: Optional[GitRepository],
         repository_path: str
     ) -> Dict[str, Any]:
-        """Independently validate a specific claim against repository data."""
+        """Independently validate a specific claim using Neo4j CPG and Git tools."""
         
         validation_result = {
             "claim": claim["claim"],
             "type": claim["type"],
             "verified": False,
             "evidence": [],
-            "issues": []
+            "issues": [],
+            "confidence": 0.0
         }
         
         try:
-            verification_method = claim.get("verification_method", "unknown")
+            validation_method = claim.get("validation_method", "unknown")
             
-            if verification_method == "git_show_validation":
-                validation_result = await self._validate_git_show_claim(claim, git_repo, repository_path)
+            if validation_method == "neo4j_cpg_query":
+                validation_result = await self._validate_code_element_change(claim)
                 
-            elif verification_method == "git_commit_validation":
-                validation_result = await self._validate_commit_claim(claim, git_repo)
+            elif validation_method == "neo4j_relationship_query":
+                validation_result = await self._validate_dependency_relationship(claim)
                 
-            elif verification_method == "dependency_validation":
-                validation_result = await self._validate_dependency_claim(claim, repository_path)
+            elif validation_method == "git_commit_message_check":
+                validation_result = await self._validate_commit_intent(claim, git_repo, repository_path)
                 
-            elif verification_method == "integration_validation":
-                validation_result = await self._validate_integration_claim(claim, repository_path)
+            elif validation_method == "neo4j_function_location_query":
+                validation_result = await self._validate_function_location(claim)
                 
-            elif verification_method == "confidence_validation":
-                validation_result = await self._validate_confidence_claim(claim)
+            elif validation_method == "neo4j_inheritance_query":
+                validation_result = await self._validate_inheritance_relationship(claim)
                 
-            elif verification_method == "steps_validation":
-                validation_result = await self._validate_steps_claim(claim)
+            elif validation_method == "git_commit_existence_check":
+                validation_result = await self._validate_commit_existence(claim, git_repo)
                 
             else:
-                validation_result["issues"].append(f"Unknown verification method: {verification_method}")
+                validation_result["issues"].append(f"Unknown validation method: {validation_method}")
+                validation_result["confidence"] = 0.0
                 
         except Exception as e:
             validation_result["issues"].append(f"Validation error: {str(e)}")
+            validation_result["confidence"] = 0.0
+            
+        return validation_result
+        
+    async def _validate_code_element_change(self, claim: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate code element change claim using Neo4j CPG query."""
+        
+        validation_result = {
+            "claim": claim["claim"],
+            "type": claim["type"],
+            "verified": False,
+            "evidence": [],
+            "issues": [],
+            "confidence": 0.0
+        }
+        
+        if not self.neo4j_tool:
+            validation_result["issues"].append("Neo4j tool not available for validation")
+            return validation_result
+            
+        try:
+            element_type = claim["element_type"]
+            element_name = claim["element_name"]
+            commit_sha = claim["commit_sha"]
+            
+            # Query Neo4j CPG to verify the relationship exists
+            query = f"""
+            MATCH (e:{element_type} {{name: $element_name}})
+            MATCH (c:Commit {{sha: $commit_sha}})
+            MATCH (e)-[:CHANGED_IN]->(c)
+            RETURN e.name as element_name, e.file_path as file_path, 
+                   c.sha as commit_sha, c.message as commit_message
+            """
+            
+            results = await self.neo4j_tool.execute(
+                "query", 
+                query=query, 
+                parameters={
+                    "element_name": element_name,
+                    "commit_sha": commit_sha
+                }
+            )
+            
+            if results and len(results) > 0:
+                validation_result["verified"] = True
+                validation_result["confidence"] = 1.0
+                validation_result["evidence"].append(
+                    f"Neo4j CPG confirms {element_type} {element_name} was changed in commit {commit_sha}"
+                )
+                for result in results:
+                    validation_result["evidence"].append(
+                        f"Found in file: {result.get('file_path', 'unknown')}"
+                    )
+            else:
+                validation_result["verified"] = False
+                validation_result["confidence"] = 0.0
+                validation_result["issues"].append(
+                    f"Neo4j CPG query found no evidence that {element_type} {element_name} was changed in commit {commit_sha}"
+                )
+                
+        except Exception as e:
+            validation_result["issues"].append(f"Neo4j validation error: {str(e)}")
+            validation_result["confidence"] = 0.0
+            
+        return validation_result
+        
+    async def _validate_dependency_relationship(self, claim: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate dependency relationship claim using Neo4j CPG query."""
+        
+        validation_result = {
+            "claim": claim["claim"],
+            "type": claim["type"],
+            "verified": False,
+            "evidence": [],
+            "issues": [],
+            "confidence": 0.0
+        }
+        
+        if not self.neo4j_tool:
+            validation_result["issues"].append("Neo4j tool not available for validation")
+            return validation_result
+            
+        try:
+            caller = claim["caller"]
+            callee = claim["callee"]
+            relationship = claim["relationship"]
+            
+            # Query Neo4j CPG to verify the relationship exists
+            query = f"""
+            MATCH (caller:Function {{name: $caller}})
+            MATCH (callee:Function {{name: $callee}})
+            MATCH (caller)-[:{relationship}]->(callee)
+            RETURN caller.name as caller_name, caller.file_path as caller_file,
+                   callee.name as callee_name, callee.file_path as callee_file
+            """
+            
+            results = await self.neo4j_tool.execute(
+                "query",
+                query=query,
+                parameters={
+                    "caller": caller,
+                    "callee": callee
+                }
+            )
+            
+            if results and len(results) > 0:
+                validation_result["verified"] = True
+                validation_result["confidence"] = 1.0
+                validation_result["evidence"].append(
+                    f"Neo4j CPG confirms function {caller} {relationship.lower()}s function {callee}"
+                )
+                for result in results:
+                    validation_result["evidence"].append(
+                        f"Caller in: {result.get('caller_file', 'unknown')}, "
+                        f"Callee in: {result.get('callee_file', 'unknown')}"
+                    )
+            else:
+                validation_result["verified"] = False
+                validation_result["confidence"] = 0.0
+                validation_result["issues"].append(
+                    f"Neo4j CPG query found no {relationship} relationship between {caller} and {callee}"
+                )
+                
+        except Exception as e:
+            validation_result["issues"].append(f"Neo4j validation error: {str(e)}")
+            validation_result["confidence"] = 0.0
+            
+        return validation_result
+        
+    async def _validate_commit_intent(
+        self, 
+        claim: Dict[str, Any], 
+        git_repo: Optional[GitRepository],
+        repository_path: str
+    ) -> Dict[str, Any]:
+        """Validate commit message intent using Git tools."""
+        
+        validation_result = {
+            "claim": claim["claim"],
+            "type": claim["type"],
+            "verified": False,
+            "evidence": [],
+            "issues": [],
+            "confidence": 0.0
+        }
+        
+        if not git_repo:
+            validation_result["issues"].append("Git repository not available for validation")
+            return validation_result
+            
+        try:
+            commit_sha = claim["commit_sha"]
+            expected_intent = claim["intent"]
+            
+            # Use Git tool to get commit information
+            commit_info = git_repo.get_commit_info(commit_sha)
+            
+            if commit_info and commit_info.get("message"):
+                commit_message = commit_info["message"].lower()
+                
+                if expected_intent.lower() in commit_message:
+                    validation_result["verified"] = True
+                    validation_result["confidence"] = 1.0
+                    validation_result["evidence"].append(
+                        f"Commit message contains expected intent: '{expected_intent}'"
+                    )
+                    validation_result["evidence"].append(
+                        f"Full commit message: {commit_info['message'][:200]}..."
+                    )
+                else:
+                    validation_result["verified"] = False
+                    validation_result["confidence"] = 0.0
+                    validation_result["issues"].append(
+                        f"Commit message does not contain expected intent: '{expected_intent}'"
+                    )
+                    validation_result["issues"].append(
+                        f"Actual commit message: {commit_info['message'][:100]}..."
+                    )
+            else:
+                validation_result["verified"] = False
+                validation_result["confidence"] = 0.0
+                validation_result["issues"].append(f"Could not retrieve commit message for {commit_sha}")
+                
+        except Exception as e:
+            validation_result["issues"].append(f"Git validation error: {str(e)}")
+            validation_result["confidence"] = 0.0
+            
+        return validation_result
+        
+    async def _validate_function_location(self, claim: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate function location claim using Neo4j CPG query."""
+        
+        validation_result = {
+            "claim": claim["claim"],
+            "type": claim["type"],
+            "verified": False,
+            "evidence": [],
+            "issues": [],
+            "confidence": 0.0
+        }
+        
+        if not self.neo4j_tool:
+            validation_result["issues"].append("Neo4j tool not available for validation")
+            return validation_result
+            
+        try:
+            function_name = claim["function_name"]
+            expected_line = claim["line_number"]
+            expected_file = claim["file_path"]
+            
+            # Query Neo4j CPG to verify function location
+            query = """
+            MATCH (f:Function {name: $function_name})
+            WHERE f.file_path = $file_path
+            AND f.start_line <= $line_number 
+            AND f.end_line >= $line_number
+            RETURN f.name as name, f.file_path as file_path,
+                   f.start_line as start_line, f.end_line as end_line
+            """
+            
+            results = await self.neo4j_tool.execute(
+                "query",
+                query=query,
+                parameters={
+                    "function_name": function_name,
+                    "file_path": expected_file,
+                    "line_number": expected_line
+                }
+            )
+            
+            if results and len(results) > 0:
+                validation_result["verified"] = True
+                validation_result["confidence"] = 1.0
+                result = results[0]
+                validation_result["evidence"].append(
+                    f"Neo4j CPG confirms function {function_name} exists in {expected_file} "
+                    f"at lines {result['start_line']}-{result['end_line']}"
+                )
+            else:
+                validation_result["verified"] = False
+                validation_result["confidence"] = 0.0
+                validation_result["issues"].append(
+                    f"Neo4j CPG found no function {function_name} at line {expected_line} in {expected_file}"
+                )
+                
+        except Exception as e:
+            validation_result["issues"].append(f"Neo4j validation error: {str(e)}")
+            validation_result["confidence"] = 0.0
+            
+        return validation_result
+        
+    async def _validate_inheritance_relationship(self, claim: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate inheritance relationship claim using Neo4j CPG query."""
+        
+        validation_result = {
+            "claim": claim["claim"],
+            "type": claim["type"],
+            "verified": False,
+            "evidence": [],
+            "issues": [],
+            "confidence": 0.0
+        }
+        
+        if not self.neo4j_tool:
+            validation_result["issues"].append("Neo4j tool not available for validation")
+            return validation_result
+            
+        try:
+            child_class = claim["child_class"]
+            parent_class = claim["parent_class"]
+            
+            # Query Neo4j CPG to verify inheritance relationship
+            query = """
+            MATCH (child:Class {name: $child_class})
+            MATCH (parent:Class {name: $parent_class})
+            MATCH (child)-[:INHERITS_FROM]->(parent)
+            RETURN child.name as child_name, child.file_path as child_file,
+                   parent.name as parent_name, parent.file_path as parent_file
+            """
+            
+            results = await self.neo4j_tool.execute(
+                "query",
+                query=query,
+                parameters={
+                    "child_class": child_class,
+                    "parent_class": parent_class
+                }
+            )
+            
+            if results and len(results) > 0:
+                validation_result["verified"] = True
+                validation_result["confidence"] = 1.0
+                validation_result["evidence"].append(
+                    f"Neo4j CPG confirms class {child_class} inherits from class {parent_class}"
+                )
+                for result in results:
+                    validation_result["evidence"].append(
+                        f"Child class in: {result.get('child_file', 'unknown')}, "
+                        f"Parent class in: {result.get('parent_file', 'unknown')}"
+                    )
+            else:
+                validation_result["verified"] = False
+                validation_result["confidence"] = 0.0
+                validation_result["issues"].append(
+                    f"Neo4j CPG found no inheritance relationship between {child_class} and {parent_class}"
+                )
+                
+        except Exception as e:
+            validation_result["issues"].append(f"Neo4j validation error: {str(e)}")
+            validation_result["confidence"] = 0.0
+            
+        return validation_result
+        
+    async def _validate_commit_existence(
+        self, 
+        claim: Dict[str, Any], 
+        git_repo: Optional[GitRepository]
+    ) -> Dict[str, Any]:
+        """Validate commit existence using Git tools."""
+        
+        validation_result = {
+            "claim": claim["claim"],
+            "type": claim["type"],
+            "verified": False,
+            "evidence": [],
+            "issues": [],
+            "confidence": 0.0
+        }
+        
+        if not git_repo:
+            validation_result["issues"].append("Git repository not available for validation")
+            return validation_result
+            
+        try:
+            commit_sha = claim["commit_sha"]
+            
+            # Use Git tool to verify commit exists
+            commit_info = git_repo.get_commit_info(commit_sha)
+            
+            if commit_info:
+                validation_result["verified"] = True
+                validation_result["confidence"] = 1.0
+                validation_result["evidence"].append(f"Commit {commit_sha} exists in repository")
+                validation_result["evidence"].append(f"Author: {commit_info.get('author', 'unknown')}")
+                validation_result["evidence"].append(f"Date: {commit_info.get('date', 'unknown')}")
+            else:
+                validation_result["verified"] = False
+                validation_result["confidence"] = 0.0
+                validation_result["issues"].append(f"Commit {commit_sha} not found in repository")
+                
+        except Exception as e:
+            validation_result["issues"].append(f"Git validation error: {str(e)}")
+            validation_result["confidence"] = 0.0
             
         return validation_result
         
@@ -944,60 +1484,40 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
         citation_validation: Dict[str, Any], 
         content_validation: Dict[str, Any]
     ) -> float:
-        """Calculate validation score based on ACTUAL INDEPENDENT VERIFICATION."""
+        """Calculate validation score based on ACTUAL INDEPENDENT VERIFICATION using Neo4j and Git."""
         
-        # Start with base score
-        base_score = 0.0
-        score_components = []
-        
-        # Citation validation score (30% weight)
-        total_citations = citation_validation["total_citations"]
-        if total_citations > 0:
-            valid_citations = citation_validation["valid_citations"]
-            citation_score = valid_citations / total_citations
-            score_components.append(("citations", citation_score, 0.3))
-        else:
-            # No citations is concerning for verification
-            score_components.append(("citations", 0.2, 0.3))
-            
-        # Content validation score (50% weight) - MOST IMPORTANT
+        # Calculate score based on actual validation results
         total_claims = content_validation.get("claims_validated", 0) + content_validation.get("claims_failed", 0)
-        if total_claims > 0:
-            valid_claims = content_validation.get("claims_validated", 0)
-            content_score = valid_claims / total_claims
-            score_components.append(("content", content_score, 0.5))
-        else:
-            # No verifiable claims is very concerning
-            score_components.append(("content", 0.1, 0.5))
-            
-        # Independent verification bonus (20% weight)
-        if content_validation.get("independent_verification", False):
-            # Bonus for actually performing independent verification
-            verification_details = content_validation.get("validation_details", [])
-            verified_count = len([v for v in verification_details if v.get("verified", False)])
-            total_validations = len(verification_details)
-            
-            if total_validations > 0:
-                verification_score = verified_count / total_validations
-                score_components.append(("independent_verification", verification_score, 0.2))
-            else:
-                score_components.append(("independent_verification", 0.1, 0.2))
-        else:
-            # No independent verification performed
-            score_components.append(("independent_verification", 0.0, 0.2))
-            
-        # Calculate weighted score
-        overall_score = sum(score * weight for _, score, weight in score_components)
         
-        # Apply penalties for critical issues
-        if content_validation.get("claims_failed", 0) > content_validation.get("claims_validated", 0):
-            overall_score *= 0.7  # 30% penalty for more failed than validated claims
+        if total_claims == 0:
+            # No claims to validate - neutral score
+            return 0.5
             
-        if citation_validation.get("invalid_citations", 0) > citation_validation.get("valid_citations", 0):
-            overall_score *= 0.8  # 20% penalty for more invalid than valid citations
+        # Primary score: ratio of validated claims
+        validated_claims = content_validation.get("claims_validated", 0)
+        primary_score = validated_claims / total_claims
+        
+        # Weight by citation validation
+        citation_weight = 0.3
+        content_weight = 0.7
+        
+        citation_score = 0.5  # Default neutral
+        total_citations = citation_validation.get("total_citations", 0)
+        if total_citations > 0:
+            valid_citations = citation_validation.get("valid_citations", 0)
+            citation_score = valid_citations / total_citations
+            
+        # Calculate weighted final score
+        final_score = (citation_score * citation_weight) + (primary_score * content_weight)
+        
+        # Apply confidence boost for high validation rates
+        if primary_score >= 0.8:  # 80% or more claims validated
+            final_score = min(1.0, final_score * 1.1)  # 10% boost
+        elif primary_score <= 0.3:  # 30% or fewer claims validated
+            final_score = final_score * 0.8  # 20% penalty
             
         # Ensure score is between 0 and 1
-        return max(0.0, min(1.0, overall_score))
+        return max(0.0, min(1.0, final_score))
         
     def _generate_validation_recommendations(self, validation_result: Dict[str, Any]) -> str:
         """Generate recommendations based on validation results."""
@@ -1603,3 +2123,35 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
             validation["score"] = 0.1
             
         return validation
+        
+    async def _add_validation_uncertainty(
+        self, 
+        finding: AgentFinding, 
+        claim: Dict[str, Any], 
+        validation_result: Dict[str, Any]
+    ) -> None:
+        """Add validation uncertainty to the agent state."""
+        
+        uncertainty_message = f"Analyst claim failed: {claim['claim']}"
+        
+        if validation_result.get("issues"):
+            uncertainty_message += f" - {'; '.join(validation_result['issues'])}"
+            
+        # Add to verification uncertainties (this would be added to state in the calling method)
+        self.logger.warning(f"Validation uncertainty: {uncertainty_message}")
+        
+        # Store uncertainty details for reporting
+        if not hasattr(self, '_validation_uncertainties'):
+            self._validation_uncertainties = []
+            
+        self._validation_uncertainties.append({
+            "finding_agent": finding.agent_name,
+            "finding_type": finding.finding_type,
+            "failed_claim": claim["claim"],
+            "uncertainty": uncertainty_message,
+            "validation_details": validation_result
+        })
+        
+    def get_validation_uncertainties(self) -> List[Dict[str, Any]]:
+        """Get all validation uncertainties found during verification."""
+        return getattr(self, '_validation_uncertainties', [])

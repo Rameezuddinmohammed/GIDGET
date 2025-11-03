@@ -759,3 +759,373 @@ class TestAgentPerformance:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestVerificationAgentIndependentValidation:
+    """Test suite for VerificationAgent independent validation."""
+    
+    @pytest.fixture
+    def verification_agent(self):
+        """Create verification agent for testing."""
+        return VerificationAgent()
+        
+    @pytest.fixture
+    def verification_agent_with_neo4j(self):
+        """Create verification agent with mocked Neo4j client."""
+        from unittest.mock import MagicMock
+        from src.code_intelligence.database.neo4j_client import Neo4jClient
+        
+        mock_neo4j_client = MagicMock(spec=Neo4jClient)
+        return VerificationAgent(neo4j_client=mock_neo4j_client)
+        
+    @pytest.fixture
+    def sample_state_with_claims(self):
+        """Create sample state with findings that make verifiable claims."""
+        state = AgentState(
+            session_id="test_verification",
+            query={"original": "Test independent validation"},
+            repository={"path": "/test/repo"}
+        )
+        
+        # Add finding with code element change claim
+        code_change_finding = AgentFinding(
+            agent_name="analyst",
+            finding_type="code_element_changed",
+            content="Function authenticate_user was modified in commit abc123",
+            confidence=0.8,
+            citations=[],
+            metadata={"commit_sha": "abc123"}
+        )
+        state.add_finding("analyst", code_change_finding)
+        
+        # Add finding with dependency claim
+        dependency_finding = AgentFinding(
+            agent_name="analyst",
+            finding_type="dependency_changed", 
+            content="Function login now calls function validate_password",
+            confidence=0.9,
+            citations=[],
+            metadata={}
+        )
+        state.add_finding("analyst", dependency_finding)
+        
+        return state
+        
+    def test_verification_agent_basic(self, verification_agent):
+        """Test basic VerificationAgent functionality."""
+        assert verification_agent.config.name == "verifier"
+        assert "validates findings" in verification_agent.config.description.lower()
+        assert verification_agent.neo4j_tool is None  # No Neo4j client provided
+        assert verification_agent.git_tool is not None
+        
+    def test_verification_agent_with_neo4j(self, verification_agent_with_neo4j):
+        """Test VerificationAgent with Neo4j client."""
+        assert verification_agent_with_neo4j.neo4j_tool is not None
+        assert verification_agent_with_neo4j.neo4j_client is not None
+        
+    @pytest.mark.asyncio
+    async def test_claim_extraction_code_changes(self, verification_agent):
+        """Test extraction of code element change claims."""
+        finding = AgentFinding(
+            agent_name="analyst",
+            finding_type="code_element_changed",
+            content="Function authenticate_user was modified in commit abc123 and Class UserManager was added in commit def456",
+            confidence=0.8,
+            citations=[],
+            metadata={}
+        )
+        
+        claims = await verification_agent._extract_verifiable_claims(finding)
+        
+        # Should extract 2 claims
+        assert len(claims) >= 2
+        
+        # Check function change claim
+        function_claims = [c for c in claims if c.get("element_type") == "Function"]
+        assert len(function_claims) >= 1
+        
+        function_claim = function_claims[0]
+        assert function_claim["type"] == "code_element_changed"
+        assert function_claim["element_name"] == "authenticate_user"
+        assert function_claim["commit_sha"] == "abc123"
+        assert function_claim["validation_method"] == "neo4j_cpg_query"
+        
+        # Check class change claim
+        class_claims = [c for c in claims if c.get("element_type") == "Class"]
+        assert len(class_claims) >= 1
+        
+        class_claim = class_claims[0]
+        assert class_claim["type"] == "code_element_changed"
+        assert class_claim["element_name"] == "UserManager"
+        assert class_claim["commit_sha"] == "def456"
+        
+    @pytest.mark.asyncio
+    async def test_claim_extraction_dependencies(self, verification_agent):
+        """Test extraction of dependency relationship claims."""
+        finding = AgentFinding(
+            agent_name="analyst",
+            finding_type="dependency_changed",
+            content="Function login now calls function validate_password and Module auth imports module crypto",
+            confidence=0.9,
+            citations=[],
+            metadata={}
+        )
+        
+        claims = await verification_agent._extract_verifiable_claims(finding)
+        
+        # Should extract 2 claims
+        assert len(claims) >= 2
+        
+        # Check function call claim
+        call_claims = [c for c in claims if c.get("relationship") == "CALLS"]
+        assert len(call_claims) >= 1
+        
+        call_claim = call_claims[0]
+        assert call_claim["type"] == "dependency_changed"
+        assert call_claim["caller"] == "login"
+        assert call_claim["callee"] == "validate_password"
+        assert call_claim["validation_method"] == "neo4j_relationship_query"
+        
+        # Check import claim
+        import_claims = [c for c in claims if c.get("relationship") == "IMPORTS"]
+        assert len(import_claims) >= 1
+        
+        import_claim = import_claims[0]
+        assert import_claim["caller"] == "auth"
+        assert import_claim["callee"] == "crypto"
+        
+    @pytest.mark.asyncio
+    async def test_claim_extraction_commit_intent(self, verification_agent):
+        """Test extraction of commit message intent claims."""
+        finding = AgentFinding(
+            agent_name="historian",
+            finding_type="commit_message_intent",
+            content="This change was to fix bug #123 in commit abc123",
+            confidence=0.8,
+            citations=[],
+            metadata={"commit_sha": "abc123"}
+        )
+        
+        claims = await verification_agent._extract_verifiable_claims(finding)
+        
+        # Should extract 1 claim
+        assert len(claims) >= 1
+        
+        intent_claim = claims[0]
+        assert intent_claim["type"] == "commit_message_intent"
+        assert intent_claim["commit_sha"] == "abc123"
+        assert intent_claim["intent"] == "bug #123"
+        assert intent_claim["validation_method"] == "git_commit_message_check"
+        
+    @pytest.mark.asyncio
+    async def test_independent_validation_success(self, verification_agent_with_neo4j, sample_state_with_claims):
+        """Test independent validation when claims are successfully verified."""
+        from unittest.mock import AsyncMock
+        
+        agent = verification_agent_with_neo4j
+        
+        # Mock Neo4j tool to return successful validation results
+        agent.neo4j_tool.execute = AsyncMock()
+        agent.neo4j_tool.execute.side_effect = [
+            # First call: code element change validation - SUCCESS
+            [{"element_name": "authenticate_user", "file_path": "auth.py", "commit_sha": "abc123"}],
+            # Second call: dependency relationship validation - SUCCESS
+            [{"caller_name": "login", "caller_file": "auth.py", "callee_name": "validate_password", "callee_file": "auth.py"}]
+        ]
+        
+        # Execute verification
+        result_state = await agent.execute(sample_state_with_claims)
+        
+        # Verify Neo4j queries were made
+        assert agent.neo4j_tool.execute.call_count >= 2
+        
+        # Check verification findings
+        verification_findings = result_state.get_findings_by_agent("verifier")
+        assert len(verification_findings) > 0
+        
+        # Should have high confidence since claims were validated
+        verification_finding = verification_findings[0]
+        assert verification_finding.confidence >= 0.8
+        
+        # Should have no validation uncertainties
+        uncertainties = agent.get_validation_uncertainties()
+        assert len(uncertainties) == 0
+        
+    @pytest.mark.asyncio
+    async def test_independent_validation_failure(self, verification_agent_with_neo4j, sample_state_with_claims):
+        """Test independent validation when claims fail verification."""
+        from unittest.mock import AsyncMock
+        
+        agent = verification_agent_with_neo4j
+        
+        # Mock Neo4j tool to return failed validation results (empty results)
+        agent.neo4j_tool.execute = AsyncMock()
+        agent.neo4j_tool.execute.return_value = []  # No results = validation failed
+        
+        # Execute verification
+        result_state = await agent.execute(sample_state_with_claims)
+        
+        # Verify Neo4j queries were made
+        assert agent.neo4j_tool.execute.call_count >= 1
+        
+        # Check verification findings
+        verification_findings = result_state.get_findings_by_agent("verifier")
+        assert len(verification_findings) > 0
+        
+        # Should have low confidence since claims failed validation
+        verification_finding = verification_findings[0]
+        assert verification_finding.confidence < 0.5
+        
+        # Should have validation uncertainties
+        uncertainties = agent.get_validation_uncertainties()
+        assert len(uncertainties) > 0
+        assert "failed" in uncertainties[0]["uncertainty"].lower()
+        
+    @pytest.mark.asyncio
+    async def test_confidence_calculation_based_on_validation_results(self, verification_agent):
+        """Test that confidence scores are calculated based on actual validation results."""
+        agent = verification_agent
+        
+        # Test Case 1: All claims validated (3/3) = High confidence
+        citation_validation = {"total_citations": 2, "valid_citations": 2}
+        content_validation = {"claims_validated": 3, "claims_failed": 0}
+        
+        confidence = agent._calculate_validation_score(citation_validation, content_validation)
+        assert confidence >= 0.9, f"Expected high confidence (>=0.9), got {confidence}"
+        
+        # Test Case 2: Partial validation (2/3) = Medium confidence  
+        content_validation = {"claims_validated": 2, "claims_failed": 1}
+        
+        confidence = agent._calculate_validation_score(citation_validation, content_validation)
+        assert 0.6 <= confidence <= 0.8, f"Expected medium confidence (0.6-0.8), got {confidence}"
+        
+        # Test Case 3: Most claims failed (1/3) = Low confidence
+        content_validation = {"claims_validated": 1, "claims_failed": 2}
+        
+        confidence = agent._calculate_validation_score(citation_validation, content_validation)
+        assert confidence <= 0.5, f"Expected low confidence (<=0.5), got {confidence}"
+        
+        # Test Case 4: No claims to validate = Neutral confidence
+        content_validation = {"claims_validated": 0, "claims_failed": 0}
+        
+        confidence = agent._calculate_validation_score(citation_validation, content_validation)
+        assert confidence == 0.5, f"Expected neutral confidence (0.5), got {confidence}"
+        
+    @pytest.mark.asyncio
+    async def test_neo4j_code_element_validation(self, verification_agent_with_neo4j):
+        """Test Neo4j CPG query for code element change validation."""
+        from unittest.mock import AsyncMock
+        
+        agent = verification_agent_with_neo4j
+        
+        # Mock successful Neo4j response
+        agent.neo4j_tool.execute = AsyncMock()
+        agent.neo4j_tool.execute.return_value = [
+            {
+                "element_name": "authenticate_user",
+                "file_path": "src/auth.py", 
+                "commit_sha": "abc123",
+                "commit_message": "Fix authentication bug"
+            }
+        ]
+        
+        # Test claim
+        claim = {
+            "type": "code_element_changed",
+            "element_type": "Function",
+            "element_name": "authenticate_user",
+            "commit_sha": "abc123",
+            "claim": "Function authenticate_user was modified in commit abc123",
+            "validation_method": "neo4j_cpg_query"
+        }
+        
+        # Validate claim
+        result = await agent._validate_code_element_change(claim)
+        
+        # Verify Neo4j query was called with correct parameters
+        agent.neo4j_tool.execute.assert_called_once()
+        call_args = agent.neo4j_tool.execute.call_args
+        assert call_args[1]["parameters"]["element_name"] == "authenticate_user"
+        assert call_args[1]["parameters"]["commit_sha"] == "abc123"
+        
+        # Verify successful validation
+        assert result["verified"] is True
+        assert result["confidence"] == 1.0
+        assert len(result["evidence"]) > 0
+        assert "Neo4j CPG confirms" in result["evidence"][0]
+        
+    @pytest.mark.asyncio
+    async def test_neo4j_dependency_validation(self, verification_agent_with_neo4j):
+        """Test Neo4j CPG query for dependency relationship validation."""
+        from unittest.mock import AsyncMock
+        
+        agent = verification_agent_with_neo4j
+        
+        # Mock successful Neo4j response
+        agent.neo4j_tool.execute = AsyncMock()
+        agent.neo4j_tool.execute.return_value = [
+            {
+                "caller_name": "login",
+                "caller_file": "src/auth.py",
+                "callee_name": "validate_password", 
+                "callee_file": "src/auth.py"
+            }
+        ]
+        
+        # Test claim
+        claim = {
+            "type": "dependency_changed",
+            "caller": "login",
+            "callee": "validate_password",
+            "relationship": "CALLS",
+            "claim": "Function login calls function validate_password",
+            "validation_method": "neo4j_relationship_query"
+        }
+        
+        # Validate claim
+        result = await agent._validate_dependency_relationship(claim)
+        
+        # Verify Neo4j query was called
+        agent.neo4j_tool.execute.assert_called_once()
+        
+        # Verify successful validation
+        assert result["verified"] is True
+        assert result["confidence"] == 1.0
+        assert "Neo4j CPG confirms" in result["evidence"][0]
+        
+    def test_validation_uncertainty_tracking(self, verification_agent):
+        """Test that validation uncertainties are properly tracked."""
+        agent = verification_agent
+        
+        # Create test finding and claim
+        finding = AgentFinding(
+            agent_name="analyst",
+            finding_type="dependency_changed",
+            content="Function foo calls function bar",
+            confidence=0.9,
+            citations=[],
+            metadata={}
+        )
+        
+        claim = {
+            "type": "dependency_changed",
+            "claim": "Function foo calls function bar"
+        }
+        
+        validation_result = {
+            "verified": False,
+            "issues": ["Neo4j CPG found no CALLS relationship between foo and bar"]
+        }
+        
+        # Add uncertainty
+        asyncio.run(agent._add_validation_uncertainty(finding, claim, validation_result))
+        
+        # Check uncertainties were recorded
+        uncertainties = agent.get_validation_uncertainties()
+        assert len(uncertainties) == 1
+        
+        uncertainty = uncertainties[0]
+        assert uncertainty["finding_agent"] == "analyst"
+        assert uncertainty["finding_type"] == "dependency_changed"
+        assert uncertainty["failed_claim"] == "Function foo calls function bar"
+        assert "Analyst claim failed" in uncertainty["uncertainty"]

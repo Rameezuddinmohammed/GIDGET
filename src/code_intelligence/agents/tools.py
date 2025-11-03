@@ -136,12 +136,15 @@ class GitTool(AgentTool):
 class Neo4jTool(AgentTool):
     """Tool for Neo4j graph database operations."""
     
+    model_config = {"arbitrary_types_allowed": True}
+    client: Neo4jClient
+    
     def __init__(self, neo4j_client: Neo4jClient):
         super().__init__(
             name="neo4j_tool",
-            description="Tool for graph database queries and analysis"
+            description="Tool for graph database queries and analysis",
+            client=neo4j_client
         )
-        self.client = neo4j_client
         
     async def execute(
         self, 
@@ -229,12 +232,15 @@ class Neo4jTool(AgentTool):
 class VectorSearchTool(AgentTool):
     """Tool for semantic vector search operations."""
     
+    model_config = {"arbitrary_types_allowed": True}
+    client: SupabaseClient
+    
     def __init__(self, supabase_client: SupabaseClient):
         super().__init__(
             name="vector_search_tool",
-            description="Tool for semantic code search using vector embeddings"
+            description="Tool for semantic code search using vector embeddings",
+            client=supabase_client
         )
-        self.client = supabase_client
         
     async def execute(
         self, 

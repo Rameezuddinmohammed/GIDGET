@@ -19,10 +19,9 @@ class AgentTool(BaseModel):
     name: str
     description: str
     
-    @abstractmethod
     async def execute(self, **kwargs: Any) -> Any:
         """Execute the tool."""
-        pass
+        raise NotImplementedError("Subclasses must implement execute method")
 
 
 class LLMConfig(BaseModel):
