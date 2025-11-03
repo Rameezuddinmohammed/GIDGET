@@ -1,0 +1,52 @@
+[tool.poetry]
+name = "multi-agent-code-intelligence"
+version = "0.1.0"
+description = "Multi-Agent Code Intelligence System for analyzing code evolution"
+authors = ["Developer <dev@example.com>"]
+readme = "README.md"
+packages = [{include = "code_intelligence", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+neo4j = "^5.15.0"
+supabase = "^2.3.0"
+langchain = "^0.1.0"
+langgraph = "^0.0.40"
+python-dotenv = "^1.0.0"
+pydantic = "^2.5.0"
+structlog = "^23.2.0"
+typer = "^0.9.0"
+fastapi = "^0.104.0"
+uvicorn = "^0.24.0"
+websockets = "^12.0"
+httpx = "^0.25.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+pytest-asyncio = "^0.21.0"
+black = "^23.11.0"
+isort = "^5.12.0"
+flake8 = "^6.1.0"
+mypy = "^1.7.0"
+pre-commit = "^3.5.0"
+
+[tool.poetry.scripts]
+code-intel = "code_intelligence.cli:app"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+target-version = ['py311']
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
