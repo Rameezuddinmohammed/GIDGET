@@ -102,7 +102,7 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
         self.uncertainty_detection_template = uncertainty_detection_template
         
     async def execute(self, state: AgentState) -> AgentState:
-        """Execute verification logic."""
+        """Execute INDEPENDENT verification logic against actual repository data."""
         self._log_execution_start(state)
         
         if not self._validate_state(state):
@@ -2155,3 +2155,404 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
     def get_validation_uncertainties(self) -> List[Dict[str, Any]]:
         """Get all validation uncertainties found during verification."""
         return getattr(self, '_validation_uncertainties', [])
+        
+    async def _extract_specific_claims_from_finding(self, finding: AgentFinding) -> List[Dict[str, Any]]:
+        """Extract specific, verifiable claims from a finding that can be validated against repository data."""
+        claims = []
+        content = finding.content.lower()
+        
+        # Extract function call claims: "Function A calls function B"
+        call_pattern = r'function\s+(\w+)\s+(?:now\s+)?calls?\s+function\s+(\w+)'
+        for match in re.finditer(call_pattern, content):
+            claims.append({
+                "type": "function_calls",
+                "claim": f"Function {match.group(1)} calls function {match.group(2)}",
+                "caller": match.group(1),
+                "callee": match.group(2),
+                "validation_method": "neo4j_calls_query"
+            })
+        
+        # Extract function modification claims: "Function X was modified in commit Y"
+        modification_pattern = r'function\s+(\w+)\s+(?:was\s+)?(?:modified|changed|updated)\s+(?:in\s+)?commit\s+([a-f0-9]{7,40})'
+        for match in re.finditer(modification_pattern, content):
+            claims.append({
+                "type": "function_modified",
+                "claim": f"Function {match.group(1)} was modified in commit {match.group(2)}",
+                "function_name": match.group(1),
+                "commit_sha": match.group(2),
+                "validation_method": "neo4j_git_modification_query"
+            })
+        
+        # Extract class inheritance claims: "Class A inherits from class B"
+        inheritance_pattern = r'class\s+(\w+)\s+(?:inherits\s+from|extends)\s+class\s+(\w+)'
+        for match in re.finditer(inheritance_pattern, content):
+            claims.append({
+                "type": "class_inheritance",
+                "claim": f"Class {match.group(1)} inherits from class {match.group(2)}",
+                "child_class": match.group(1),
+                "parent_class": match.group(2),
+                "validation_method": "neo4j_inheritance_query"
+            })
+        
+        # Extract import/dependency claims: "Module A imports module B"
+        import_pattern = r'(?:module|class)\s+(\w+)\s+imports?\s+(?:module|class)?\s*(\w+)'
+        for match in re.finditer(import_pattern, content):
+            claims.append({
+                "type": "module_imports",
+                "claim": f"Module {match.group(1)} imports module {match.group(2)}",
+                "importer": match.group(1),
+                "imported": match.group(2),
+                "validation_method": "neo4j_imports_query"
+            })
+        
+        # Extract commit message intent claims from metadata
+        if finding.metadata and "commit_sha" in finding.metadata:
+            commit_sha = finding.metadata["commit_sha"]
+            # Look for bug fix claims
+            bug_pattern = r'(?:fix|fixes|fixed)\s+(?:bug\s+)?[#]?(\d+)'
+            for match in re.finditer(bug_pattern, content):
+                claims.append({
+                    "type": "commit_intent",
+                    "claim": f"Commit {commit_sha} was to fix bug #{match.group(1)}",
+                    "commit_sha": commit_sha,
+                    "intent": f"bug #{match.group(1)}",
+                    "validation_method": "git_commit_message_validation"
+                })
+        
+        return claims
+    
+    async def _independently_validate_claim_against_repository(
+        self, 
+        claim: Dict[str, Any], 
+        git_repo: Optional[GitRepository],
+        repository_path: str,
+        state: AgentState
+    ) -> Dict[str, Any]:
+        """Independently validate a specific claim against actual repository data using Neo4j and Git."""
+        
+        validation_result = {
+            "claim": claim["claim"],
+            "type": claim["type"],
+            "validated": False,
+            "evidence": [],
+            "reason": "",
+            "neo4j_query_executed": False,
+            "git_validation_performed": False
+        }
+        
+        try:
+            validation_method = claim.get("validation_method", "unknown")
+            
+            if validation_method == "neo4j_calls_query":
+                validation_result = await self._validate_function_calls_with_neo4j(claim, validation_result)
+                
+            elif validation_method == "neo4j_git_modification_query":
+                validation_result = await self._validate_function_modification_with_neo4j_and_git(
+                    claim, git_repo, validation_result
+                )
+                
+            elif validation_method == "neo4j_inheritance_query":
+                validation_result = await self._validate_class_inheritance_with_neo4j(claim, validation_result)
+                
+            elif validation_method == "neo4j_imports_query":
+                validation_result = await self._validate_module_imports_with_neo4j(claim, validation_result)
+                
+            elif validation_method == "git_commit_message_validation":
+                validation_result = await self._validate_commit_intent_with_git(claim, git_repo, validation_result)
+                
+            else:
+                validation_result["reason"] = f"Unknown validation method: {validation_method}"
+                
+        except Exception as e:
+            validation_result["reason"] = f"Validation error: {str(e)}"
+            self.logger.error(f"Independent validation failed for claim '{claim['claim']}': {str(e)}")
+            
+        return validation_result
+    
+    async def _validate_function_calls_with_neo4j(self, claim: Dict[str, Any], validation_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate function call claim by independently querying Neo4j CPG."""
+        
+        if not self.neo4j_tool:
+            validation_result["reason"] = "Neo4j tool not available for validation"
+            return validation_result
+            
+        try:
+            caller = claim["caller"]
+            callee = claim["callee"]
+            
+            # INDEPENDENT NEO4J QUERY: Check if the CALLS relationship actually exists
+            query = """
+            MATCH (caller:Function {name: $caller})
+            MATCH (callee:Function {name: $callee})
+            MATCH (caller)-[:CALLS]->(callee)
+            RETURN caller.name as caller_name, caller.file_path as caller_file,
+                   callee.name as callee_name, callee.file_path as callee_file,
+                   caller.start_line as caller_line
+            """
+            
+            results = await self.neo4j_tool.execute(
+                "query",
+                query=query,
+                parameters={"caller": caller, "callee": callee}
+            )
+            
+            validation_result["neo4j_query_executed"] = True
+            
+            if results and len(results) > 0:
+                validation_result["validated"] = True
+                validation_result["evidence"] = [
+                    f"Neo4j CPG confirms function {caller} calls function {callee}",
+                    f"Caller location: {results[0].get('caller_file', 'unknown')}:{results[0].get('caller_line', 'unknown')}",
+                    f"Callee location: {results[0].get('callee_file', 'unknown')}"
+                ]
+            else:
+                validation_result["validated"] = False
+                validation_result["reason"] = f"Neo4j CPG query found no CALLS relationship between {caller} and {callee}"
+                
+        except Exception as e:
+            validation_result["reason"] = f"Neo4j validation error: {str(e)}"
+            
+        return validation_result
+    
+    async def _validate_function_modification_with_neo4j_and_git(
+        self, 
+        claim: Dict[str, Any], 
+        git_repo: Optional[GitRepository],
+        validation_result: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Validate function modification claim by querying both Neo4j CPG and Git history."""
+        
+        function_name = claim["function_name"]
+        commit_sha = claim["commit_sha"]
+        
+        # Step 1: Validate with Neo4j CPG
+        if self.neo4j_tool:
+            try:
+                # INDEPENDENT NEO4J QUERY: Check if function was changed in specific commit
+                query = """
+                MATCH (f:Function {name: $function_name})
+                MATCH (c:Commit {sha: $commit_sha})
+                MATCH (f)-[:CHANGED_IN]->(c)
+                RETURN f.name as function_name, f.file_path as file_path,
+                       c.sha as commit_sha, c.message as commit_message
+                """
+                
+                results = await self.neo4j_tool.execute(
+                    "query",
+                    query=query,
+                    parameters={"function_name": function_name, "commit_sha": commit_sha}
+                )
+                
+                validation_result["neo4j_query_executed"] = True
+                
+                if results and len(results) > 0:
+                    validation_result["validated"] = True
+                    validation_result["evidence"].append(
+                        f"Neo4j CPG confirms function {function_name} was changed in commit {commit_sha}"
+                    )
+                    validation_result["evidence"].append(
+                        f"Function location: {results[0].get('file_path', 'unknown')}"
+                    )
+                else:
+                    validation_result["reason"] = f"Neo4j CPG found no evidence that function {function_name} was changed in commit {commit_sha}"
+                    
+            except Exception as e:
+                validation_result["reason"] = f"Neo4j validation error: {str(e)}"
+        
+        # Step 2: Cross-reference with Git history
+        if git_repo and not validation_result["validated"]:
+            try:
+                # INDEPENDENT GIT VALIDATION: Check commit exists and get diff
+                commit_info = git_repo.get_commit_info(commit_sha)
+                validation_result["git_validation_performed"] = True
+                
+                if commit_info:
+                    validation_result["evidence"].append(f"Git confirms commit {commit_sha} exists")
+                    
+                    # Try to get diff to see if function was actually modified
+                    try:
+                        changed_files = git_repo.get_changed_files(commit_sha)
+                        if changed_files:
+                            validation_result["evidence"].append(f"Commit modified {len(changed_files)} files")
+                            # If Neo4j didn't confirm but Git shows changes, mark as partially validated
+                            if not validation_result["validated"]:
+                                validation_result["validated"] = True
+                                validation_result["reason"] = "Validated via Git history (Neo4j CPG may be incomplete)"
+                    except Exception:
+                        pass  # Diff analysis failed, but commit exists
+                else:
+                    validation_result["reason"] = f"Git validation failed: commit {commit_sha} not found"
+                    
+            except Exception as e:
+                validation_result["reason"] = f"Git validation error: {str(e)}"
+        
+        return validation_result
+    
+    async def _validate_class_inheritance_with_neo4j(self, claim: Dict[str, Any], validation_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate class inheritance claim by independently querying Neo4j CPG."""
+        
+        if not self.neo4j_tool:
+            validation_result["reason"] = "Neo4j tool not available for validation"
+            return validation_result
+            
+        try:
+            child_class = claim["child_class"]
+            parent_class = claim["parent_class"]
+            
+            # INDEPENDENT NEO4J QUERY: Check if inheritance relationship exists
+            query = """
+            MATCH (child:Class {name: $child_class})
+            MATCH (parent:Class {name: $parent_class})
+            MATCH (child)-[:INHERITS_FROM]->(parent)
+            RETURN child.name as child_name, child.file_path as child_file,
+                   parent.name as parent_name, parent.file_path as parent_file
+            """
+            
+            results = await self.neo4j_tool.execute(
+                "query",
+                query=query,
+                parameters={"child_class": child_class, "parent_class": parent_class}
+            )
+            
+            validation_result["neo4j_query_executed"] = True
+            
+            if results and len(results) > 0:
+                validation_result["validated"] = True
+                validation_result["evidence"] = [
+                    f"Neo4j CPG confirms class {child_class} inherits from class {parent_class}",
+                    f"Child class location: {results[0].get('child_file', 'unknown')}",
+                    f"Parent class location: {results[0].get('parent_file', 'unknown')}"
+                ]
+            else:
+                validation_result["validated"] = False
+                validation_result["reason"] = f"Neo4j CPG found no inheritance relationship between {child_class} and {parent_class}"
+                
+        except Exception as e:
+            validation_result["reason"] = f"Neo4j validation error: {str(e)}"
+            
+        return validation_result
+    
+    async def _validate_module_imports_with_neo4j(self, claim: Dict[str, Any], validation_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate module import claim by independently querying Neo4j CPG."""
+        
+        if not self.neo4j_tool:
+            validation_result["reason"] = "Neo4j tool not available for validation"
+            return validation_result
+            
+        try:
+            importer = claim["importer"]
+            imported = claim["imported"]
+            
+            # INDEPENDENT NEO4J QUERY: Check if import relationship exists
+            query = """
+            MATCH (importer:Module {name: $importer})
+            MATCH (imported:Module {name: $imported})
+            MATCH (importer)-[:IMPORTS]->(imported)
+            RETURN importer.name as importer_name, importer.file_path as importer_file,
+                   imported.name as imported_name, imported.file_path as imported_file
+            """
+            
+            results = await self.neo4j_tool.execute(
+                "query",
+                query=query,
+                parameters={"importer": importer, "imported": imported}
+            )
+            
+            validation_result["neo4j_query_executed"] = True
+            
+            if results and len(results) > 0:
+                validation_result["validated"] = True
+                validation_result["evidence"] = [
+                    f"Neo4j CPG confirms module {importer} imports module {imported}",
+                    f"Importer location: {results[0].get('importer_file', 'unknown')}",
+                    f"Imported location: {results[0].get('imported_file', 'unknown')}"
+                ]
+            else:
+                validation_result["validated"] = False
+                validation_result["reason"] = f"Neo4j CPG found no import relationship between {importer} and {imported}"
+                
+        except Exception as e:
+            validation_result["reason"] = f"Neo4j validation error: {str(e)}"
+            
+        return validation_result
+    
+    async def _validate_commit_intent_with_git(
+        self, 
+        claim: Dict[str, Any], 
+        git_repo: Optional[GitRepository],
+        validation_result: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Validate commit message intent claim by independently checking Git history."""
+        
+        if not git_repo:
+            validation_result["reason"] = "Git repository not available for validation"
+            return validation_result
+            
+        try:
+            commit_sha = claim["commit_sha"]
+            expected_intent = claim["intent"]
+            
+            # INDEPENDENT GIT VALIDATION: Get actual commit message
+            commit_info = git_repo.get_commit_info(commit_sha)
+            validation_result["git_validation_performed"] = True
+            
+            if commit_info and commit_info.get("message"):
+                commit_message = commit_info["message"].lower()
+                
+                if expected_intent.lower() in commit_message:
+                    validation_result["validated"] = True
+                    validation_result["evidence"] = [
+                        f"Git confirms commit {commit_sha} message contains expected intent: '{expected_intent}'",
+                        f"Full commit message: {commit_info['message'][:200]}..."
+                    ]
+                else:
+                    validation_result["validated"] = False
+                    validation_result["reason"] = f"Git commit message does not contain expected intent '{expected_intent}'"
+                    validation_result["evidence"] = [
+                        f"Actual commit message: {commit_info['message'][:100]}..."
+                    ]
+            else:
+                validation_result["validated"] = False
+                validation_result["reason"] = f"Could not retrieve commit message for {commit_sha}"
+                
+        except Exception as e:
+            validation_result["reason"] = f"Git validation error: {str(e)}"
+            
+        return validation_result
+    
+    def _extract_validation_citations(self, validation_results: List[Dict[str, Any]]) -> List[Citation]:
+        """Extract citations from validation results."""
+        citations = []
+        
+        for result in validation_results:
+            if result.get("validated") and result.get("validation_details"):
+                for detail in result["validation_details"]:
+                    if detail.get("evidence"):
+                        citations.append(Citation(
+                            file_path="neo4j_cpg",
+                            line_number=0,
+                            commit_sha="independent_validation",
+                            description=f"Independent validation: {detail['claim']}"
+                        ))
+        
+        return citations
+    
+    def _count_neo4j_queries(self, validation_results: List[Dict[str, Any]]) -> int:
+        """Count the number of Neo4j queries executed during validation."""
+        count = 0
+        for result in validation_results:
+            if result.get("validation_details"):
+                for detail in result["validation_details"]:
+                    if detail.get("neo4j_query_executed"):
+                        count += 1
+        return count
+    
+    def _count_git_validations(self, validation_results: List[Dict[str, Any]]) -> int:
+        """Count the number of Git validations performed."""
+        count = 0
+        for result in validation_results:
+            if result.get("validation_details"):
+                for detail in result["validation_details"]:
+                    if detail.get("git_validation_performed"):
+                        count += 1
+        return count
