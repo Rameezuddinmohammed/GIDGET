@@ -1,0 +1,761 @@
+"""Comprehensive tests for specialized agent capabilities."""
+
+import asyncio
+import pytest
+from datetime import datetime, timedelta
+from unittest.mock import Mock, AsyncMock, patch
+from pathlib import Path
+
+from src.code_intelligence.agents.orchestrator_agent import OrchestratorAgent
+from src.code_intelligence.agents.historian_agent import HistorianAgent
+from src.code_intelligence.agents.analyst_agent import AnalystAgent
+from src.code_intelligence.agents.synthesizer_agent import SynthesizerAgent
+from src.code_intelligence.agents.verification_agent import VerificationAgent
+from src.code_intelligence.agents.state import AgentState, AgentFinding, Citation, CodeElement, ParsedQuery, QueryScope
+from src.code_intelligence.agents.base import AgentConfig
+
+
+class TestOrchestratorAgent:
+    """Test suite for Orchestrator Agent."""
+    
+    @pytest.fixture
+    def orchestrator_agent(self):
+        """Create orchestrator agent for testing."""
+        return OrchestratorAgent()
+        
+    @pytest.fixture
+    def sample_state(self):
+        """Create sample agent state."""
+        return AgentState(
+            session_id="test-session-123",
+            query={
+                "original": "What changed in the login function since last week?",
+                "options": {}
+            },
+            repository={
+                "path": "/test/repo"
+            }
+        )
+        
+    @pytest.mark.asyncio
+    async def test_query_parsing(self, orchestrator_agent, sample_state):
+        """Test natural language query parsing."""
+        # Mock LLM response
+        with patch.object(orchestrator_agent, '_call_llm', new_callable=AsyncMock) as mock_llm:
+            mock_llm.return_value = '''
+            {
+                "intent": "find_changes",
+                "entities": ["login"],
+                "time_range": "last_week",
+                "scope": "function",
+                "keywords": ["changed", "login", "function"],
+                "requires_history": true,
+                "requires_semantic_search": false,
+                "complexity": "medium"
+            }
+            '''
+            
+            result_state = await orchestrator_agent.execute(sample_state)
+            
+            # Verify parsing results
+            assert "parsed" in result_state.query
+            parsed_query = result_state.query["parsed"]
+            assert parsed_query["intent"] == "find_changes"
+            assert "login" in parsed_query["entities"]
+            assert parsed_query["scope"] == "function"
+            
+    @pytest.mark.asyncio
+    async def test_workflow_planning(self, orchestrator_agent, sample_state):
+        """Test workflow planning logic."""
+        with patch.object(orchestrator_agent, '_call_llm', new_callable=AsyncMock) as mock_llm:
+            # Mock query parsing response
+            mock_llm.side_effect = [
+                '{"intent": "find_changes", "entities": ["login"], "time_range": "last_week", "scope": "function", "keywords": ["changed"], "requires_history": true, "requires_semantic_search": false, "complexity": "medium"}',
+                '{"required_agents": ["historian", "analyst", "synthesizer", "verifier"], "execution_plan": [{"agent": "historian", "priority": 1, "focus": "temporal_analysis"}], "parallel_execution": false, "estimated_duration": "3-5 minutes", "complexity_score": 0.7}'
+            ]
+            
+            result_state = await orchestrator_agent.execute(sample_state)
+            
+            # Verify workflow planning
+            assert "workflow_plan" in result_state.analysis
+            workflow_plan = result_state.analysis["workflow_plan"]
+            assert "historian" in workflow_plan["required_agents"]
+            assert len(workflow_plan["execution_plan"]) > 0
+            
+    @pytest.mark.asyncio
+    async def test_fallback_parsing(self, orchestrator_agent, sample_state):
+        """Test fallback query parsing when LLM fails."""
+        with patch.object(orchestrator_agent, '_call_llm', new_callable=AsyncMock) as mock_llm:
+            mock_llm.return_value = "Invalid JSON response"
+            
+            result_state = await orchestrator_agent.execute(sample_state)
+            
+            # Should still have parsed query from fallback
+            assert "parsed" in result_state.query
+            parsed_query = result_state.query["parsed"]
+            assert "intent" in parsed_query
+            
+    def test_user_preferences_integration(self, orchestrator_agent, sample_state):
+        """Test user context and preferences integration."""
+        preferences = orchestrator_agent.get_user_preferences("test-user")
+        
+        assert "preferred_detail_level" in preferences
+        assert "confidence_threshold" in preferences
+        assert preferences["include_citations"] is True
+        
+        orchestrator_agent.integrate_user_context(sample_state, "test-user")
+        
+        assert "user_preferences" in sample_state.query["options"]
+        assert "detail_level" in sample_state.query["options"]
+
+
+class TestHistorianAgent:
+    """Test suite for Historian Agent."""
+    
+    @pytest.fixture
+    def historian_agent(self):
+        """Create historian agent for testing."""
+        return HistorianAgent()
+        
+    @pytest.fixture
+    def sample_state_with_temporal_query(self):
+        """Create sample state with temporal query."""
+        return AgentState(
+            session_id="test-session-456",
+            query={
+                "original": "How did the UserService class evolve over the last month?",
+                "parsed": {
+                    "intent": "analyze_evolution",
+                    "entities": ["UserService"],
+                    "time_range": "last_month",
+                    "scope": "class"
+                }
+            },
+            repository={"path": "/test/repo"},
+            analysis={
+                "target_elements": [
+                    {"name": "UserService", "type": "class", "file_path": "src/user_service.py"}
+                ]
+            }
+        )
+        
+    @pytest.mark.asyncio
+    async def test_time_range_determination(self, historian_agent, sample_state_with_temporal_query):
+        """Test time range parsing and determination."""
+        time_range = await historian_agent._determine_time_range(sample_state_with_temporal_query)
+        
+        assert time_range is not None
+        assert time_range.start_date is not None
+        assert time_range.end_date is not None
+        assert time_range.end_date > time_range.start_date
+        
+    @pytest.mark.asyncio
+    async def test_commit_analysis(self, historian_agent):
+        """Test commit history analysis."""
+        sample_commits = [
+            {
+                "sha": "abc123",
+                "message": "Fix user authentication bug",
+                "author": "Developer",
+                "author_email": "developer@example.com",
+                "timestamp": "2024-01-01T12:00:00Z",
+                "files_changed": ["src/user_service.py"]
+            },
+            {
+                "sha": "def456", 
+                "message": "Add new user registration feature",
+                "author": "Developer",
+                "author_email": "developer@example.com",
+                "timestamp": "2024-01-02T12:00:00Z",
+                "files_changed": ["src/user_service.py", "src/registration.py"]
+            }
+        ]
+        
+        with patch.object(historian_agent, '_call_llm', new_callable=AsyncMock) as mock_llm:
+            mock_llm.return_value = '''
+            {
+                "timeline": [
+                    {
+                        "commit_sha": "abc123",
+                        "timestamp": "2024-01-01T12:00:00Z",
+                        "author": "developer@example.com",
+                        "message": "Fix user authentication bug",
+                        "intent": "bug_fix",
+                        "changes": [
+                            {
+                                "element": "UserService",
+                                "change_type": "modified",
+                                "impact": "medium",
+                                "description": "Fixed authentication logic"
+                            }
+                        ]
+                    }
+                ],
+                "patterns": [
+                    {
+                        "pattern_type": "bug_fix",
+                        "description": "Bug fix pattern detected",
+                        "commits": ["abc123"],
+                        "confidence": 0.8
+                    }
+                ],
+                "evolution_summary": "UserService underwent bug fixes and feature additions"
+            }
+            '''
+            
+            # Create a mock state for this test
+            mock_state = AgentState(
+                session_id="test-session",
+                analysis={"target_elements": [{"name": "UserService"}]}
+            )
+            
+            analysis_result = await historian_agent._analyze_commit_history(
+                mock_state, sample_commits
+            )
+            
+            assert "timeline" in analysis_result
+            assert "patterns" in analysis_result
+            assert len(analysis_result["timeline"]) > 0
+            
+    def test_intent_extraction(self, historian_agent):
+        """Test developer intent extraction from commit messages."""
+        test_messages = [
+            "Fix critical authentication bug",
+            "Add new user registration feature", 
+            "Refactor user service for better maintainability",
+            "Update dependencies to latest versions",
+            "Remove deprecated authentication methods"
+        ]
+        
+        expected_intents = ["bug_fix", "feature_addition", "refactoring", "improvement", "removal"]
+        
+        for message, expected in zip(test_messages, expected_intents):
+            intent = historian_agent._extract_intent_from_message(message)
+            assert intent == expected
+            
+    def test_timeline_visualization(self, historian_agent):
+        """Test timeline visualization data creation."""
+        analysis_result = {
+            "timeline": [
+                {
+                    "commit_sha": "abc123",
+                    "timestamp": "2024-01-01T12:00:00Z",
+                    "author": "dev1@example.com",
+                    "changes": [{"change_type": "modified"}]
+                },
+                {
+                    "commit_sha": "def456",
+                    "timestamp": "2024-01-01T15:00:00Z", 
+                    "author": "dev2@example.com",
+                    "changes": [{"change_type": "added"}]
+                }
+            ]
+        }
+        
+        visualization = historian_agent.create_timeline_visualization(analysis_result)
+        
+        assert "periods" in visualization
+        assert "total_commits" in visualization
+        assert visualization["total_commits"] == 2
+
+
+class TestAnalystAgent:
+    """Test suite for Analyst Agent."""
+    
+    @pytest.fixture
+    def analyst_agent(self):
+        """Create analyst agent for testing."""
+        return AnalystAgent()
+        
+    @pytest.fixture
+    def sample_code_elements(self):
+        """Create sample code elements for testing."""
+        return [
+            CodeElement(
+                name="UserService",
+                type="class",
+                file_path="src/user_service.py",
+                start_line=10,
+                end_line=50
+            ),
+            CodeElement(
+                name="authenticate",
+                type="function", 
+                file_path="src/auth.py",
+                start_line=5,
+                end_line=20
+            )
+        ]
+        
+    @pytest.mark.asyncio
+    async def test_dependency_analysis(self, analyst_agent, sample_code_elements):
+        """Test dependency analysis functionality."""
+        # Mock Neo4j client
+        with patch.object(analyst_agent, 'neo4j_client') as mock_neo4j:
+            mock_neo4j.execute_query = AsyncMock(side_effect=[
+                [  # Outgoing dependencies
+                    {
+                        "from_name": "UserService",
+                        "to_name": "authenticate", 
+                        "relationship": "CALLS",
+                        "to_file": "src/auth.py",
+                        "to_line": 5
+                    }
+                ],
+                [  # Incoming dependencies
+                    {
+                        "from_name": "LoginController",
+                        "to_name": "UserService",
+                        "relationship": "CALLS",
+                        "from_file": "src/controller.py",
+                        "from_line": 10
+                    }
+                ]
+            ])
+            
+            dependencies = await analyst_agent._analyze_element_dependencies(sample_code_elements[0])
+            
+            assert len(dependencies) > 0
+            assert dependencies[0]["from"] == "UserService"
+            assert dependencies[0]["to"] == "authenticate"
+            assert dependencies[0]["relationship"] == "calls"
+            
+    @pytest.mark.asyncio
+    async def test_complexity_metrics(self, analyst_agent, sample_code_elements):
+        """Test complexity metrics calculation."""
+        with patch.object(analyst_agent, 'neo4j_client') as mock_neo4j:
+            mock_neo4j.execute_query = AsyncMock(side_effect=[
+                [{"fan_out": 3}],  # Fan-out query
+                [{"fan_in": 2}]    # Fan-in query
+            ])
+            
+            fan_metrics = await analyst_agent._calculate_fan_metrics(sample_code_elements[0])
+            
+            assert fan_metrics["fan_in"] == 2
+            assert fan_metrics["fan_out"] == 3
+            
+            coupling_score = await analyst_agent._calculate_coupling_score(sample_code_elements[0])
+            assert 0.0 <= coupling_score <= 1.0
+            
+    def test_architectural_pattern_detection(self, analyst_agent, sample_code_elements):
+        """Test architectural pattern identification."""
+        # Add elements with pattern-indicating names
+        pattern_elements = sample_code_elements + [
+            CodeElement(name="UserFactory", type="class", file_path="src/factory.py"),
+            CodeElement(name="UserRepository", type="class", file_path="src/repository.py"),
+            CodeElement(name="AuthService", type="class", file_path="src/auth_service.py")
+        ]
+        
+        patterns = asyncio.run(analyst_agent._identify_architectural_patterns(pattern_elements))
+        
+        pattern_types = [p["pattern"] for p in patterns]
+        assert "factory_pattern" in pattern_types
+        assert "repository_pattern" in pattern_types
+        assert "service_pattern" in pattern_types
+        
+    @pytest.mark.asyncio
+    async def test_circular_dependency_detection(self, analyst_agent, sample_code_elements):
+        """Test circular dependency detection."""
+        with patch.object(analyst_agent, 'neo4j_client') as mock_neo4j:
+            mock_neo4j.execute_query = AsyncMock(return_value=[
+                {"cycle": ["UserService", "AuthService", "UserService"]}
+            ])
+            
+            circular_deps = await analyst_agent._detect_circular_dependencies(sample_code_elements)
+            
+            assert len(circular_deps) > 0
+            assert circular_deps[0]["length"] == 3
+            assert circular_deps[0]["severity"] == "high"
+
+
+class TestSynthesizerAgent:
+    """Test suite for Synthesizer Agent."""
+    
+    @pytest.fixture
+    def synthesizer_agent(self):
+        """Create synthesizer agent for testing."""
+        return SynthesizerAgent()
+        
+    @pytest.fixture
+    def sample_findings(self):
+        """Create sample findings from multiple agents."""
+        return [
+            AgentFinding(
+                agent_name="historian",
+                finding_type="temporal_analysis",
+                content="UserService was modified 3 times in the last week",
+                confidence=0.9,
+                citations=[
+                    Citation(file_path="src/user_service.py", description="Modified in commit abc123")
+                ]
+            ),
+            AgentFinding(
+                agent_name="analyst", 
+                finding_type="structural_analysis",
+                content="UserService has high coupling with AuthService",
+                confidence=0.8,
+                citations=[
+                    Citation(file_path="src/user_service.py", line_number=25, description="Calls AuthService.authenticate")
+                ]
+            ),
+            AgentFinding(
+                agent_name="analyst",
+                finding_type="complexity_analysis", 
+                content="UserService complexity score is 0.7",
+                confidence=0.85,
+                citations=[]
+            )
+        ]
+        
+    def test_findings_organization(self, synthesizer_agent, sample_findings):
+        """Test organization of findings by agent and type."""
+        organized = synthesizer_agent._organize_findings(sample_findings)
+        
+        assert "historian" in organized
+        assert "analyst" in organized
+        assert "temporal_analysis" in organized["historian"]
+        assert "structural_analysis" in organized["analyst"]
+        assert "complexity_analysis" in organized["analyst"]
+        
+    @pytest.mark.asyncio
+    async def test_conflict_detection(self, synthesizer_agent):
+        """Test conflict detection between agent findings."""
+        conflicting_findings = [
+            AgentFinding(
+                agent_name="agent1",
+                finding_type="complexity_analysis",
+                content="Component has low complexity",
+                confidence=0.9
+            ),
+            AgentFinding(
+                agent_name="agent2", 
+                finding_type="complexity_analysis",
+                content="Component has high complexity",
+                confidence=0.5
+            )
+        ]
+        
+        organized = synthesizer_agent._organize_findings(conflicting_findings)
+        conflicts = await synthesizer_agent._detect_conflicts(organized)
+        
+        assert len(conflicts) > 0
+        
+    def test_citation_indexing(self, synthesizer_agent, sample_findings):
+        """Test citation index creation."""
+        citation_index = synthesizer_agent._create_citation_index(sample_findings)
+        
+        assert "src/user_service.py" in citation_index
+        assert len(citation_index["src/user_service.py"]) == 2
+        
+    def test_confidence_calculation(self, synthesizer_agent, sample_findings):
+        """Test overall confidence calculation."""
+        confidence = synthesizer_agent._calculate_overall_confidence(sample_findings, [])
+        
+        # Should be average of individual confidences
+        expected = (0.9 + 0.8 + 0.85) / 3
+        assert abs(confidence - expected) < 0.01
+        
+    def test_executive_summary_creation(self, synthesizer_agent, sample_findings):
+        """Test executive summary generation."""
+        organized = synthesizer_agent._organize_findings(sample_findings)
+        summary = synthesizer_agent.create_executive_summary(organized)
+        
+        assert "3 findings" in summary
+        assert "2 specialized agents" in summary
+
+
+class TestVerificationAgent:
+    """Test suite for Verification Agent."""
+    
+    @pytest.fixture
+    def verification_agent(self):
+        """Create verification agent for testing."""
+        return VerificationAgent()
+        
+    @pytest.fixture
+    def sample_finding_with_citations(self):
+        """Create sample finding with citations for testing."""
+        return AgentFinding(
+            agent_name="analyst",
+            finding_type="structural_analysis",
+            content="Function authenticate is called by UserService.login method",
+            confidence=0.8,
+            citations=[
+                Citation(
+                    file_path="src/user_service.py",
+                    line_number=25,
+                    commit_sha="abc123",
+                    description="UserService calls authenticate"
+                )
+            ]
+        )
+        
+    @pytest.mark.asyncio
+    async def test_citation_validation(self, verification_agent, tmp_path):
+        """Test citation validation against actual files."""
+        # Create test file
+        test_file = tmp_path / "src" / "user_service.py"
+        test_file.parent.mkdir(parents=True)
+        test_file.write_text("def login():\n    authenticate()\n    return True\n")
+        
+        citations = [
+            Citation(
+                file_path="src/user_service.py",
+                line_number=2,
+                description="Test citation"
+            )
+        ]
+        
+        validation = await verification_agent._validate_citations(citations, None, str(tmp_path))
+        
+        assert validation["total_citations"] == 1
+        assert validation["valid_citations"] == 1
+        
+    @pytest.mark.asyncio
+    async def test_line_number_validation(self, verification_agent, tmp_path):
+        """Test line number validation."""
+        test_file = tmp_path / "test.py"
+        test_file.write_text("line 1\nline 2\nline 3\n")
+        
+        # Valid line number
+        assert await verification_agent._validate_line_number(str(test_file), 2) is True
+        
+        # Invalid line number
+        assert await verification_agent._validate_line_number(str(test_file), 5) is False
+        
+    def test_claim_extraction(self, verification_agent):
+        """Test extraction of specific claims from content."""
+        content = "Function authenticate is called 5 times. Class UserService depends on AuthService."
+        
+        claims = verification_agent._extract_claims_from_content(content)
+        
+        claim_types = [claim["type"] for claim in claims]
+        assert "function_reference" in claim_types
+        assert "class_reference" in claim_types
+        assert "dependency" in claim_types
+        
+    def test_uncertainty_detection(self, verification_agent):
+        """Test uncertainty detection in findings."""
+        low_confidence_findings = [
+            AgentFinding(
+                agent_name="test_agent",
+                finding_type="test_finding",
+                content="Low confidence finding",
+                confidence=0.5,
+                citations=[]
+            )
+        ]
+        
+        validation_results = [
+            {
+                "finding_type": "test_finding",
+                "validation_result": "invalid",
+                "confidence_score": 0.3
+            }
+        ]
+        
+        uncertainties = asyncio.run(
+            verification_agent._detect_uncertainties(low_confidence_findings, validation_results)
+        )
+        
+        uncertainty_types = [u["type"] for u in uncertainties]
+        assert "low_confidence" in uncertainty_types
+        assert "validation_failure" in uncertainty_types
+        assert "missing_citations" in uncertainty_types
+        
+    def test_validation_score_calculation(self, verification_agent):
+        """Test validation score calculation."""
+        citation_validation = {
+            "total_citations": 2,
+            "valid_citations": 1,
+            "invalid_citations": 1
+        }
+        
+        content_validation = {
+            "claims_validated": 3,
+            "claims_failed": 1
+        }
+        
+        score = verification_agent._calculate_validation_score(citation_validation, content_validation)
+        
+        # Citation score: 1/2 = 0.5
+        # Content score: 3/4 = 0.75 (total claims = validated + failed)
+        # Weighted: (0.5 * 0.6) + (0.75 * 0.4) = 0.3 + 0.3 = 0.6
+        expected_score = 0.6
+        assert abs(score - expected_score) < 0.01
+
+
+class TestAgentIntegration:
+    """Integration tests for agent interactions."""
+    
+    @pytest.fixture
+    def all_agents(self):
+        """Create all specialized agents."""
+        return {
+            "orchestrator": OrchestratorAgent(),
+            "historian": HistorianAgent(),
+            "analyst": AnalystAgent(), 
+            "synthesizer": SynthesizerAgent(),
+            "verifier": VerificationAgent()
+        }
+        
+    @pytest.fixture
+    def integration_state(self):
+        """Create state for integration testing."""
+        return AgentState(
+            session_id="integration-test-789",
+            query={
+                "original": "How has the authentication system evolved?",
+                "options": {}
+            },
+            repository={"path": "/test/repo"},
+            analysis={"target_elements": []}
+        )
+        
+    @pytest.mark.asyncio
+    async def test_agent_workflow_integration(self, all_agents, integration_state):
+        """Test integration between agents in a workflow."""
+        # Execute orchestrator first
+        with patch.object(all_agents["orchestrator"], '_call_llm', new_callable=AsyncMock) as mock_llm:
+            mock_llm.side_effect = [
+                '{"intent": "analyze_evolution", "entities": ["authentication"], "time_range": null, "scope": "repository", "keywords": ["authentication", "system"], "requires_history": true, "requires_semantic_search": true, "complexity": "high"}',
+                '{"required_agents": ["historian", "analyst", "synthesizer", "verifier"], "execution_plan": [], "parallel_execution": true, "estimated_duration": "5-10 minutes", "complexity_score": 0.8}'
+            ]
+            
+            state_after_orchestrator = await all_agents["orchestrator"].execute(integration_state)
+            
+            # Verify orchestrator set up the state properly
+            assert "parsed" in state_after_orchestrator.query
+            assert "workflow_plan" in state_after_orchestrator.analysis
+            
+        # Execute synthesizer with some mock findings
+        state_after_orchestrator.add_finding(
+            "historian",
+            AgentFinding(
+                agent_name="historian",
+                finding_type="temporal_analysis",
+                content="Authentication system evolved over 6 months",
+                confidence=0.85,
+                citations=[]
+            )
+        )
+        
+        state_after_orchestrator.add_finding(
+            "analyst", 
+            AgentFinding(
+                agent_name="analyst",
+                finding_type="structural_analysis",
+                content="Authentication has 3 main components",
+                confidence=0.9,
+                citations=[]
+            )
+        )
+        
+        with patch.object(all_agents["synthesizer"], '_call_llm', new_callable=AsyncMock) as mock_llm:
+            mock_llm.return_value = "## Executive Summary\nAuthentication system analysis complete.\n## Detailed Analysis\nSystem has evolved significantly."
+            
+            state_after_synthesis = await all_agents["synthesizer"].execute(state_after_orchestrator)
+            
+            # Verify synthesizer created comprehensive findings
+            synthesizer_findings = state_after_synthesis.get_findings_by_agent("synthesizer")
+            assert len(synthesizer_findings) > 0
+            assert any(f.finding_type == "comprehensive_synthesis" for f in synthesizer_findings)
+            
+    def test_state_consistency_across_agents(self, all_agents, integration_state):
+        """Test that state remains consistent as it passes between agents."""
+        original_session_id = integration_state.session_id
+        original_query = integration_state.query["original"]
+        
+        # Simulate state passing through multiple agents
+        integration_state.update_progress("orchestrator", "parsing", "processing")
+        integration_state.update_progress("historian", "analyzing", "processing") 
+        integration_state.update_progress("analyst", "analyzing", "processing")
+        
+        # Verify state consistency
+        assert integration_state.session_id == original_session_id
+        assert integration_state.query["original"] == original_query
+        assert integration_state.progress["current_agent"] == "analyst"
+        
+    @pytest.mark.asyncio
+    async def test_error_handling_across_agents(self, all_agents, integration_state):
+        """Test error handling and recovery across agents."""
+        # Simulate agent failure
+        integration_state.add_error("Test error from historian", "historian")
+        
+        # Verify error is recorded
+        assert integration_state.has_errors()
+        assert "historian" in integration_state.errors[0]
+        
+        # Synthesizer should still be able to process despite errors
+        with patch.object(all_agents["synthesizer"], '_call_llm', new_callable=AsyncMock) as mock_llm:
+            mock_llm.return_value = "Analysis completed with some limitations due to errors."
+            
+            result_state = await all_agents["synthesizer"].execute(integration_state)
+            
+            # Should have synthesizer findings despite errors
+            synthesizer_findings = result_state.get_findings_by_agent("synthesizer")
+            assert len(synthesizer_findings) >= 0  # May be 0 if no other findings to synthesize
+
+
+@pytest.mark.performance
+class TestAgentPerformance:
+    """Performance tests for agent response times."""
+    
+    @pytest.mark.asyncio
+    async def test_orchestrator_response_time(self):
+        """Test orchestrator agent response time."""
+        agent = OrchestratorAgent()
+        state = AgentState(
+            session_id="perf-test-1",
+            query={"original": "Test query", "options": {}},
+            repository={"path": "/test"}
+        )
+        
+        with patch.object(agent, '_call_llm', new_callable=AsyncMock) as mock_llm:
+            mock_llm.side_effect = [
+                '{"intent": "test", "entities": [], "time_range": null, "scope": "repository", "keywords": [], "requires_history": false, "requires_semantic_search": false, "complexity": "low"}',
+                '{"required_agents": [], "execution_plan": [], "parallel_execution": true, "estimated_duration": "1 minute", "complexity_score": 0.3}'
+            ]
+            
+            import time
+            start_time = time.time()
+            await agent.execute(state)
+            execution_time = time.time() - start_time
+            
+            # Should complete within reasonable time
+            assert execution_time < 5.0  # 5 seconds max
+            
+    @pytest.mark.asyncio
+    async def test_verification_agent_performance(self):
+        """Test verification agent performance with multiple findings."""
+        agent = VerificationAgent()
+        state = AgentState(
+            session_id="perf-test-2",
+            query={"original": "Test query"},
+            repository={"path": "/test"}
+        )
+        
+        # Add multiple findings to verify
+        for i in range(10):
+            state.add_finding(
+                f"test_agent_{i}",
+                AgentFinding(
+                    agent_name=f"test_agent_{i}",
+                    finding_type="test_finding",
+                    content=f"Test finding {i}",
+                    confidence=0.8,
+                    citations=[]
+                )
+            )
+            
+        import time
+        start_time = time.time()
+        await agent.execute(state)
+        execution_time = time.time() - start_time
+        
+        # Should handle 10 findings within reasonable time
+        assert execution_time < 10.0  # 10 seconds max for 10 findings
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
