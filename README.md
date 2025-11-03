@@ -82,6 +82,8 @@ The system is built on three main planes:
 - **Intelligence Plane**: Multi-agent orchestration with LangGraph
 - **Experience Plane**: REST API, WebSocket, Web UI, and CLI interfaces
 
+- ![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/Rameezuddinmohammed/GIDGET?utm_source=oss&utm_medium=github&utm_campaign=Rameezuddinmohammed%2FGIDGET&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
+
 ## License
 
 [License information]
