@@ -163,49 +163,48 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
                 
                 # QUALITY GATE: 80% threshold for individual findings
                 if overall_confidence >= 0.8:
-                # HIGH CONFIDENCE: Create approved report
-                verification_finding = self._create_finding(
-                    finding_type="verified_report",
-                    content=f"✅ VERIFIED REPORT (Confidence: {overall_confidence:.1%})\n"
-                           f"Validated {len(validation_results)} findings. "
-                           f"{verification_summary['valid_count']} valid, "
-                           f"{verification_summary['invalid_count']} invalid, "
-                           f"{verification_summary['uncertain_count']} uncertain.\n"
-                           f"Report meets quality standards and is ready for use.",
-                    confidence=overall_confidence,
-                    citations=self._extract_verified_citations(all_findings, validation_results),
-                    metadata={
-                        "validation_results": validation_results,
-                        "verification_summary": verification_summary,
-                        "quality_gate": "PASSED",
-                        "ready_for_user": True
-                    }
-                )
-                state.add_finding(self.config.name, verification_finding)
+                    # HIGH CONFIDENCE: Create approved report
+                    verification_finding = self._create_finding(
+                        finding_type="verified_report",
+                        content=f"✅ VERIFIED REPORT (Confidence: {overall_confidence:.1%})\n"
+                               f"Validated {len(validation_results)} findings. "
+                               f"{verification_summary['valid_count']} valid, "
+                               f"{verification_summary['invalid_count']} invalid, "
+                               f"{verification_summary['uncertain_count']} uncertain.\n"
+                               f"Report meets quality standards and is ready for use.",
+                        confidence=overall_confidence,
+                        citations=self._extract_verified_citations(all_findings, validation_results),
+                        metadata={
+                            "validation_results": validation_results,
+                            "verification_summary": verification_summary,
+                            "quality_gate": "PASSED",
+                            "ready_for_user": True
+                        }
+                    )
+                    state.add_finding(self.config.name, verification_finding)
                 
-                # Mark state as verified and ready
-                state.verification["quality_gate_passed"] = True
-                state.verification["ready_for_user"] = True
-                
-            else:
-                # LOW CONFIDENCE: Create investigation needed report
-                verification_finding = self._create_finding(
-                    finding_type="investigation_needed",
-                    content=f"⚠️ INVESTIGATION NEEDED (Confidence: {overall_confidence:.1%})\n"
-                           f"Analysis incomplete. {verification_summary['valid_count']}/{len(validation_results)} findings validated.\n"
-                           f"Issues found: {len(uncertainties)} uncertainties detected.\n"
-                           f"Recommendation: Gather more data or manual review required.",
-                    confidence=overall_confidence,
-                    citations=[],
-                    metadata={
-                        "validation_results": validation_results,
-                        "verification_summary": verification_summary,
-                        "quality_gate": "FAILED",
-                        "ready_for_user": False,
-                        "required_actions": self._generate_improvement_actions(uncertainties)
-                    }
-                )
-                state.add_finding(self.config.name, verification_finding)
+                    # Mark state as verified and ready
+                    state.verification["quality_gate_passed"] = True
+                    state.verification["ready_for_user"] = True
+                    
+                else:
+                    # LOW CONFIDENCE: Create investigation needed report
+                    verification_finding = self._create_finding(
+                        finding_type="investigation_needed",
+                        content=f"⚠️ INVESTIGATION NEEDED (Confidence: {overall_confidence:.1%})\n"
+                               f"Analysis incomplete. {verification_summary['valid_count']}/{len(validation_results)} findings validated.\n"
+                               f"Issues found: {verification_summary['uncertain_count']} uncertainties detected.\n"
+                               f"Recommendation: Gather more data or manual review required.",
+                        confidence=overall_confidence,
+                        citations=[],
+                        metadata={
+                            "validation_results": validation_results,
+                            "verification_summary": verification_summary,
+                            "quality_gate": "FAILED",
+                            "ready_for_user": False
+                        }
+                    )
+                    state.add_finding(self.config.name, verification_finding)
                 
                 # Mark state as needing more work
                 state.verification["quality_gate_passed"] = False
@@ -389,15 +388,424 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
         git_repo: Optional[GitRepository],
         repository_path: str
     ) -> Dict[str, Any]:
-        """Validate content claims against actual source code."""
+        """INDEPENDENTLY validate content claims against actual repository data."""
         content_validation = {
             "claims_validated": 0,
             "claims_failed": 0,
-            "validation_details": []
+            "validation_details": [],
+            "independent_verification": True
         }
         
-        # Extract specific claims from the finding content
-        claims = self._extract_claims_from_content(finding.content)
+        try:
+            # Extract specific factual claims from the finding content
+            claims = self._extract_factual_claims(finding)
+            
+            for claim in claims:
+                claim_validation = await self._independently_validate_claim(claim, git_repo, repository_path)
+                content_validation["validation_details"].append(claim_validation)
+                
+                if claim_validation["verified"]:
+                    content_validation["claims_validated"] += 1
+                else:
+                    content_validation["claims_failed"] += 1
+                    
+        except Exception as e:
+            self.logger.error(f"Content validation failed: {str(e)}")
+            content_validation["validation_details"].append({
+                "claim": "validation_error",
+                "verified": False,
+                "error": str(e)
+            })
+            content_validation["claims_failed"] += 1
+            
+        return content_validation
+        
+    def _extract_factual_claims(self, finding: AgentFinding) -> List[Dict[str, Any]]:
+        """Extract specific factual claims that can be independently verified."""
+        claims = []
+        content = finding.content.lower()
+        
+        # Historian claims to validate
+        if finding.agent_name == "historian":
+            claims.extend(self._extract_historian_claims(finding))
+            
+        # Analyst claims to validate  
+        elif finding.agent_name == "analyst":
+            claims.extend(self._extract_analyst_claims(finding))
+            
+        # Synthesizer claims to validate
+        elif finding.agent_name == "synthesizer":
+            claims.extend(self._extract_synthesizer_claims(finding))
+            
+        return claims
+        
+    def _extract_historian_claims(self, finding: AgentFinding) -> List[Dict[str, Any]]:
+        """Extract verifiable claims from historian findings."""
+        claims = []
+        content = finding.content
+        metadata = finding.metadata
+        
+        # Claim: Working code extracted from specific commit
+        if "extracted working code" in content.lower():
+            commit_sha = metadata.get("commit_sha")
+            file_path = metadata.get("file_path")
+            if commit_sha and file_path:
+                claims.append({
+                    "type": "code_extraction",
+                    "claim": f"Working code extracted from commit {commit_sha} in file {file_path}",
+                    "commit_sha": commit_sha,
+                    "file_path": file_path,
+                    "verification_method": "git_show_validation"
+                })
+                
+        # Claim: Commit contains specific changes
+        commit_pattern = r'commit ([a-f0-9]{7,40})'
+        commits = re.findall(commit_pattern, content.lower())
+        for commit_sha in commits:
+            claims.append({
+                "type": "commit_existence",
+                "claim": f"Commit {commit_sha} exists in repository",
+                "commit_sha": commit_sha,
+                "verification_method": "git_commit_validation"
+            })
+            
+        return claims
+        
+    def _extract_analyst_claims(self, finding: AgentFinding) -> List[Dict[str, Any]]:
+        """Extract verifiable claims from analyst findings."""
+        claims = []
+        content = finding.content
+        metadata = finding.metadata
+        
+        # Claim: Dependencies identified
+        if "dependencies" in metadata:
+            dependencies = metadata.get("dependencies", [])
+            for dep in dependencies:
+                if isinstance(dep, dict) and "name" in dep:
+                    claims.append({
+                        "type": "dependency_existence",
+                        "claim": f"Dependency {dep['name']} exists in codebase",
+                        "dependency_name": dep["name"],
+                        "verification_method": "dependency_validation"
+                    })
+                    
+        # Claim: Integration analysis
+        if "integration_steps" in metadata:
+            integration_steps = metadata.get("integration_steps", [])
+            claims.append({
+                "type": "integration_feasibility",
+                "claim": f"Integration requires {len(integration_steps)} steps",
+                "steps_count": len(integration_steps),
+                "verification_method": "integration_validation"
+            })
+            
+        return claims
+        
+    def _extract_synthesizer_claims(self, finding: AgentFinding) -> List[Dict[str, Any]]:
+        """Extract verifiable claims from synthesizer findings."""
+        claims = []
+        content = finding.content
+        
+        # Claim: Solution found with specific confidence
+        if "solution found" in content.lower():
+            confidence_match = re.search(r'(\d+)%\s*confidence', content.lower())
+            if confidence_match:
+                confidence = int(confidence_match.group(1))
+                claims.append({
+                    "type": "solution_confidence",
+                    "claim": f"Solution has {confidence}% confidence",
+                    "claimed_confidence": confidence,
+                    "verification_method": "confidence_validation"
+                })
+                
+        # Claim: Executable steps provided
+        step_pattern = r'step\s+(\d+):'
+        steps = re.findall(step_pattern, content.lower())
+        if steps:
+            claims.append({
+                "type": "executable_steps",
+                "claim": f"Solution provides {len(steps)} executable steps",
+                "steps_count": len(steps),
+                "verification_method": "steps_validation"
+            })
+            
+        return claims
+        
+    async def _independently_validate_claim(
+        self, 
+        claim: Dict[str, Any], 
+        git_repo: Optional[GitRepository],
+        repository_path: str
+    ) -> Dict[str, Any]:
+        """Independently validate a specific claim against repository data."""
+        
+        validation_result = {
+            "claim": claim["claim"],
+            "type": claim["type"],
+            "verified": False,
+            "evidence": [],
+            "issues": []
+        }
+        
+        try:
+            verification_method = claim.get("verification_method", "unknown")
+            
+            if verification_method == "git_show_validation":
+                validation_result = await self._validate_git_show_claim(claim, git_repo, repository_path)
+                
+            elif verification_method == "git_commit_validation":
+                validation_result = await self._validate_commit_claim(claim, git_repo)
+                
+            elif verification_method == "dependency_validation":
+                validation_result = await self._validate_dependency_claim(claim, repository_path)
+                
+            elif verification_method == "integration_validation":
+                validation_result = await self._validate_integration_claim(claim, repository_path)
+                
+            elif verification_method == "confidence_validation":
+                validation_result = await self._validate_confidence_claim(claim)
+                
+            elif verification_method == "steps_validation":
+                validation_result = await self._validate_steps_claim(claim)
+                
+            else:
+                validation_result["issues"].append(f"Unknown verification method: {verification_method}")
+                
+        except Exception as e:
+            validation_result["issues"].append(f"Validation error: {str(e)}")
+            
+        return validation_result
+        
+    async def _validate_git_show_claim(
+        self, 
+        claim: Dict[str, Any], 
+        git_repo: Optional[GitRepository],
+        repository_path: str
+    ) -> Dict[str, Any]:
+        """Validate code extraction claim by independently checking git show."""
+        
+        validation_result = {
+            "claim": claim["claim"],
+            "type": claim["type"],
+            "verified": False,
+            "evidence": [],
+            "issues": []
+        }
+        
+        if not git_repo:
+            validation_result["issues"].append("No git repository available for validation")
+            return validation_result
+            
+        try:
+            commit_sha = claim["commit_sha"]
+            file_path = claim["file_path"]
+            
+            # Independently extract the file content using git show
+            import subprocess
+            cmd = ["git", "show", f"{commit_sha}:{file_path}"]
+            result = subprocess.run(
+                cmd, 
+                cwd=repository_path, 
+                capture_output=True, 
+                text=True, 
+                timeout=10
+            )
+            
+            if result.returncode == 0:
+                extracted_content = result.stdout
+                if len(extracted_content) > 50:  # Reasonable code length
+                    validation_result["verified"] = True
+                    validation_result["evidence"].append(f"Successfully extracted {len(extracted_content)} characters from {file_path} at {commit_sha}")
+                else:
+                    validation_result["issues"].append("Extracted content too short to be meaningful code")
+            else:
+                validation_result["issues"].append(f"Git show failed: {result.stderr}")
+                
+        except subprocess.TimeoutExpired:
+            validation_result["issues"].append("Git show command timed out")
+        except Exception as e:
+            validation_result["issues"].append(f"Git show validation error: {str(e)}")
+            
+        return validation_result
+        
+    async def _validate_commit_claim(
+        self, 
+        claim: Dict[str, Any], 
+        git_repo: Optional[GitRepository]
+    ) -> Dict[str, Any]:
+        """Validate commit existence claim by independently checking git log."""
+        
+        validation_result = {
+            "claim": claim["claim"],
+            "type": claim["type"],
+            "verified": False,
+            "evidence": [],
+            "issues": []
+        }
+        
+        if not git_repo:
+            validation_result["issues"].append("No git repository available for validation")
+            return validation_result
+            
+        try:
+            commit_sha = claim["commit_sha"]
+            
+            # Independently verify commit exists
+            commit_info = git_repo.get_commit_info(commit_sha)
+            if commit_info:
+                validation_result["verified"] = True
+                validation_result["evidence"].append(f"Commit {commit_sha} exists with message: {commit_info.get('message', '')[:100]}")
+            else:
+                validation_result["issues"].append(f"Commit {commit_sha} not found in repository")
+                
+        except Exception as e:
+            validation_result["issues"].append(f"Commit validation error: {str(e)}")
+            
+        return validation_result
+        
+    async def _validate_dependency_claim(
+        self, 
+        claim: Dict[str, Any], 
+        repository_path: str
+    ) -> Dict[str, Any]:
+        """Validate dependency claim by independently checking source files."""
+        
+        validation_result = {
+            "claim": claim["claim"],
+            "type": claim["type"],
+            "verified": False,
+            "evidence": [],
+            "issues": []
+        }
+        
+        try:
+            dependency_name = claim["dependency_name"]
+            
+            # Independently search for dependency in source files
+            found_in_files = []
+            
+            # Check common dependency files
+            dependency_files = ["requirements.txt", "package.json", "pom.xml", "build.gradle"]
+            for dep_file in dependency_files:
+                file_path = os.path.join(repository_path, dep_file)
+                if os.path.exists(file_path):
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                            if dependency_name in content:
+                                found_in_files.append(dep_file)
+                    except Exception:
+                        continue
+                        
+            # Check source files for imports
+            for root, dirs, files in os.walk(repository_path):
+                # Skip .git and other hidden directories
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+                
+                for file in files[:10]:  # Limit to first 10 files for performance
+                    if any(file.endswith(ext) for ext in ['.py', '.java', '.js', '.ts']):
+                        file_path = os.path.join(root, file)
+                        try:
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                content = f.read()
+                                if dependency_name in content:
+                                    found_in_files.append(file)
+                                    break  # Found it, move on
+                        except Exception:
+                            continue
+                            
+            if found_in_files:
+                validation_result["verified"] = True
+                validation_result["evidence"].append(f"Dependency {dependency_name} found in: {', '.join(found_in_files[:3])}")
+            else:
+                validation_result["issues"].append(f"Dependency {dependency_name} not found in codebase")
+                
+        except Exception as e:
+            validation_result["issues"].append(f"Dependency validation error: {str(e)}")
+            
+        return validation_result
+        
+    async def _validate_integration_claim(
+        self, 
+        claim: Dict[str, Any], 
+        repository_path: str
+    ) -> Dict[str, Any]:
+        """Validate integration steps claim by checking feasibility."""
+        
+        validation_result = {
+            "claim": claim["claim"],
+            "type": claim["type"],
+            "verified": False,
+            "evidence": [],
+            "issues": []
+        }
+        
+        try:
+            steps_count = claim["steps_count"]
+            
+            # Reasonable integration should have 2-10 steps
+            if 2 <= steps_count <= 10:
+                validation_result["verified"] = True
+                validation_result["evidence"].append(f"Integration steps count ({steps_count}) is reasonable")
+            else:
+                validation_result["issues"].append(f"Integration steps count ({steps_count}) seems unrealistic")
+                
+        except Exception as e:
+            validation_result["issues"].append(f"Integration validation error: {str(e)}")
+            
+        return validation_result
+        
+    async def _validate_confidence_claim(self, claim: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate confidence claim by checking if it's reasonable."""
+        
+        validation_result = {
+            "claim": claim["claim"],
+            "type": claim["type"],
+            "verified": False,
+            "evidence": [],
+            "issues": []
+        }
+        
+        try:
+            claimed_confidence = claim["claimed_confidence"]
+            
+            # Confidence should be between 0-100%
+            if 0 <= claimed_confidence <= 100:
+                validation_result["verified"] = True
+                validation_result["evidence"].append(f"Confidence value ({claimed_confidence}%) is within valid range")
+            else:
+                validation_result["issues"].append(f"Confidence value ({claimed_confidence}%) is outside valid range")
+                
+        except Exception as e:
+            validation_result["issues"].append(f"Confidence validation error: {str(e)}")
+            
+        return validation_result
+        
+    async def _validate_steps_claim(self, claim: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate executable steps claim by checking reasonableness."""
+        
+        validation_result = {
+            "claim": claim["claim"],
+            "type": claim["type"],
+            "verified": False,
+            "evidence": [],
+            "issues": []
+        }
+        
+        try:
+            steps_count = claim["steps_count"]
+            
+            # Reasonable solution should have 1-8 steps
+            if 1 <= steps_count <= 8:
+                validation_result["verified"] = True
+                validation_result["evidence"].append(f"Steps count ({steps_count}) is reasonable for executable solution")
+            else:
+                validation_result["issues"].append(f"Steps count ({steps_count}) seems unrealistic for executable solution")
+                
+        except Exception as e:
+            validation_result["issues"].append(f"Steps validation error: {str(e)}")
+            
+        return validation_result
         
         for claim in claims:
             claim_result = await self._validate_specific_claim(claim, finding, git_repo, repository_path)
@@ -536,29 +944,60 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
         citation_validation: Dict[str, Any], 
         content_validation: Dict[str, Any]
     ) -> float:
-        """Calculate overall validation score."""
-        citation_score = 0.0
-        content_score = 0.0
+        """Calculate validation score based on ACTUAL INDEPENDENT VERIFICATION."""
         
-        # Citation validation score
+        # Start with base score
+        base_score = 0.0
+        score_components = []
+        
+        # Citation validation score (30% weight)
         total_citations = citation_validation["total_citations"]
         if total_citations > 0:
             valid_citations = citation_validation["valid_citations"]
             citation_score = valid_citations / total_citations
+            score_components.append(("citations", citation_score, 0.3))
         else:
-            citation_score = 0.5  # Neutral score if no citations
+            # No citations is concerning for verification
+            score_components.append(("citations", 0.2, 0.3))
             
-        # Content validation score
+        # Content validation score (50% weight) - MOST IMPORTANT
         total_claims = content_validation.get("claims_validated", 0) + content_validation.get("claims_failed", 0)
         if total_claims > 0:
             valid_claims = content_validation.get("claims_validated", 0)
             content_score = valid_claims / total_claims
+            score_components.append(("content", content_score, 0.5))
         else:
-            content_score = 0.5  # Neutral score if no claims
+            # No verifiable claims is very concerning
+            score_components.append(("content", 0.1, 0.5))
             
-        # Weighted average (citations are more important)
-        overall_score = (citation_score * 0.6) + (content_score * 0.4)
-        return overall_score
+        # Independent verification bonus (20% weight)
+        if content_validation.get("independent_verification", False):
+            # Bonus for actually performing independent verification
+            verification_details = content_validation.get("validation_details", [])
+            verified_count = len([v for v in verification_details if v.get("verified", False)])
+            total_validations = len(verification_details)
+            
+            if total_validations > 0:
+                verification_score = verified_count / total_validations
+                score_components.append(("independent_verification", verification_score, 0.2))
+            else:
+                score_components.append(("independent_verification", 0.1, 0.2))
+        else:
+            # No independent verification performed
+            score_components.append(("independent_verification", 0.0, 0.2))
+            
+        # Calculate weighted score
+        overall_score = sum(score * weight for _, score, weight in score_components)
+        
+        # Apply penalties for critical issues
+        if content_validation.get("claims_failed", 0) > content_validation.get("claims_validated", 0):
+            overall_score *= 0.7  # 30% penalty for more failed than validated claims
+            
+        if citation_validation.get("invalid_citations", 0) > citation_validation.get("valid_citations", 0):
+            overall_score *= 0.8  # 20% penalty for more invalid than valid citations
+            
+        # Ensure score is between 0 and 1
+        return max(0.0, min(1.0, overall_score))
         
     def _generate_validation_recommendations(self, validation_result: Dict[str, Any]) -> str:
         """Generate recommendations based on validation results."""
