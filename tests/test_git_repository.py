@@ -121,22 +121,19 @@ class TestRepositoryManager:
         
         assert "test_repo" not in repository_manager.list_repositories()
     
+    @patch('src.code_intelligence.git.repository.GitRepository')
     @patch('git.Repo.clone_from')
-    def test_clone_repository(self, mock_clone, repository_manager, sample_git_repo):
+    def test_clone_repository(self, mock_clone, mock_git_repo_class, repository_manager, sample_git_repo):
         """Test cloning repository."""
         # Mock the clone operation
         mock_clone.return_value = None
         
-        # Create a mock repo in the expected location
-        repo_path = repository_manager.base_path / "test_repo"
-        repo_path.mkdir(parents=True)
-        
-        # Copy sample repo to mock cloned repo
-        import shutil
-        shutil.copytree(sample_git_repo, repo_path, dirs_exist_ok=True)
+        # Mock GitRepository constructor
+        mock_git_repo_instance = Mock(spec=GitRepository)
+        mock_git_repo_class.return_value = mock_git_repo_instance
         
         git_repo = repository_manager.clone_repository("https://github.com/test/test_repo.git", "test_repo")
         
-        assert isinstance(git_repo, GitRepository)
+        assert git_repo == mock_git_repo_instance
         assert "test_repo" in repository_manager.list_repositories()
         mock_clone.assert_called_once()

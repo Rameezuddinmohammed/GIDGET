@@ -8,6 +8,7 @@ import uuid
 
 from ..database.neo4j_client import Neo4jClient
 from ..git.repository import GitRepository, RepositoryManager
+from ..git.models import CommitInfo, ChangeType
 from ..parsing.parser import MultiLanguageParser
 from .graph_populator import GraphPopulator
 from .models import IngestionJob, IngestionStatus
@@ -177,37 +178,85 @@ class IngestionPipeline:
                 # Create commit node
                 self.graph_populator.create_commit_node(commit_info, job.repository_id)
                 
-                # Checkout commit to analyze its state
-                git_repo.checkout(commit_info.sha)
-                
-                # Parse files at this commit
-                parsed_files = self.parser.parse_directory(
-                    str(git_repo.repo_path),
-                    include_patterns=job.include_patterns,
-                    exclude_patterns=job.exclude_patterns
-                )
-                
-                # Filter out files with errors for now
-                valid_files = [f for f in parsed_files if not f.parse_errors]
-                job.total_files += len(parsed_files)
-                job.processed_files += len(valid_files)
-                
-                # Ingest parsed files
-                if valid_files:
-                    stats = self.graph_populator.ingest_parsed_files(
-                        valid_files, commit_info.sha, job.repository_id
+                # Delta-aware processing: only parse changed files
+                if commit_info.file_changes:
+                    # Get files that were added or modified
+                    changed_files = []
+                    for file_change in commit_info.file_changes:
+                        if file_change.change_type in [ChangeType.ADDED, ChangeType.MODIFIED]:  # Added or Modified
+                            # Check if file matches our patterns
+                            if self._should_process_file(file_change.file_path, job.include_patterns, job.exclude_patterns):
+                                changed_files.append(file_change.file_path)
+                    
+                    if changed_files:
+                        # Checkout commit to analyze changed files
+                        git_repo.checkout(commit_info.sha)
+                        
+                        # Parse only the changed files
+                        parsed_files = []
+                        for file_path in changed_files:
+                            full_path = git_repo.repo_path / file_path
+                            if full_path.exists():
+                                try:
+                                    parsed_file = self.parser.parse_file(str(full_path))
+                                    if parsed_file and not parsed_file.parse_errors:
+                                        parsed_files.append(parsed_file)
+                                except Exception as e:
+                                    logger.warning(f"Failed to parse {file_path}: {e}")
+                                    continue
+                        
+                        job.total_files += len(changed_files)
+                        job.processed_files += len(parsed_files)
+                        
+                        # Ingest parsed files
+                        if parsed_files:
+                            stats = self.graph_populator.ingest_parsed_files(
+                                parsed_files, commit_info.sha, job.repository_id
+                            )
+                            total_elements += stats['nodes']
+                            total_relationships += stats['relationships']
+                else:
+                    # First commit has no parents, so no file_changes - parse all files
+                    git_repo.checkout(commit_info.sha)
+                    parsed_files = self.parser.parse_directory(
+                        str(git_repo.repo_path),
+                        include_patterns=job.include_patterns,
+                        exclude_patterns=job.exclude_patterns
                     )
-                    total_elements += stats['nodes']
-                    total_relationships += stats['relationships']
+                    # Filter out files with errors
+                    valid_files = [f for f in parsed_files if not f.parse_errors]
+                    job.total_files += len(parsed_files)
+                    job.processed_files += len(valid_files)
+                    
+                    # Ingest parsed files
+                    if valid_files:
+                        stats = self.graph_populator.ingest_parsed_files(
+                            valid_files, commit_info.sha, job.repository_id
+                        )
+                        total_elements += stats['nodes']
+                        total_relationships += stats['relationships']
+                
+                # For unchanged files, create relationships to existing nodes
+                # This maintains the graph structure without re-parsing
+                if i > 0:  # Skip for first commit
+                    self._link_unchanged_files_to_commit(commit_info, job.repository_id)
                 
                 # Update progress
                 job.processed_commits = i + 1
                 self._notify_progress(job)
                 
-                logger.debug(
-                    f"Processed commit {commit_info.sha[:8]} "
-                    f"({i+1}/{len(commits)}): {len(valid_files)} files"
-                )
+                # Log processing info
+                if commit_info.file_changes:
+                    changed_count = len([fc for fc in commit_info.file_changes if fc.change_type in [ChangeType.ADDED, ChangeType.MODIFIED]])
+                    logger.debug(
+                        f"Processed commit {commit_info.sha[:8]} "
+                        f"({i+1}/{len(commits)}): {changed_count} changed files"
+                    )
+                else:
+                    logger.debug(
+                        f"Processed commit {commit_info.sha[:8]} "
+                        f"({i+1}/{len(commits)}): first commit, parsed all files"
+                    )
                 
             except Exception as e:
                 logger.error(f"Failed to process commit {commit_info.sha}: {e}")
@@ -282,6 +331,59 @@ class IngestionPipeline:
             path = path[:-4]
         
         return path.split('/')[-1]
+    
+    def _should_process_file(self, file_path: str, include_patterns: List[str], exclude_patterns: List[str]) -> bool:
+        """Check if a file should be processed based on include/exclude patterns."""
+        import fnmatch
+        
+        # Check exclude patterns first
+        for pattern in exclude_patterns:
+            if fnmatch.fnmatch(file_path, pattern):
+                return False
+        
+        # Check include patterns
+        for pattern in include_patterns:
+            if fnmatch.fnmatch(file_path, pattern):
+                return True
+        
+        return False
+    
+    def _link_unchanged_files_to_commit(self, commit_info: CommitInfo, repository_id: str):
+        """Link unchanged files from previous commit to current commit."""
+        # Get files that were not changed in this commit
+        changed_file_paths = {fc.file_path for fc in commit_info.file_changes}
+        
+        # Query for files from the previous commit that weren't changed
+        query = """
+        MATCH (prev_commit:Commit)-[:CHANGED_IN]-(file:File)-[:CONTAINS]->(element:CodeElement)
+        WHERE prev_commit.repository_id = $repo_id 
+        AND prev_commit.sha IN $parent_shas
+        AND NOT file.path IN $changed_files
+        
+        MATCH (current_commit:Commit {sha: $current_sha, repository_id: $repo_id})
+        
+        // Create relationships for unchanged files and elements
+        MERGE (file)-[:CHANGED_IN]->(current_commit)
+        MERGE (element)-[:CHANGED_IN]->(current_commit)
+        
+        RETURN count(DISTINCT file) as linked_files, count(DISTINCT element) as linked_elements
+        """
+        
+        try:
+            result = self.neo4j.execute_query_sync(query, {
+                'repo_id': repository_id,
+                'parent_shas': commit_info.parents,
+                'changed_files': list(changed_file_paths),
+                'current_sha': commit_info.sha
+            })
+            
+            if result:
+                logger.debug(
+                    f"Linked {result[0]['linked_files']} unchanged files and "
+                    f"{result[0]['linked_elements']} elements to commit {commit_info.sha[:8]}"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to link unchanged files for commit {commit_info.sha}: {e}")
     
     def cleanup_repository(self, repository_id: str, keep_commits: int = 100):
         """Clean up old data for a repository."""

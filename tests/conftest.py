@@ -1,5 +1,6 @@
 """Pytest configuration and fixtures."""
 
+import os
 import pytest
 import tempfile
 import shutil
@@ -17,13 +18,75 @@ def temp_dir():
     """Create a temporary directory for tests."""
     temp_path = tempfile.mkdtemp()
     yield Path(temp_path)
-    shutil.rmtree(temp_path)
+    # Windows-safe cleanup with multiple strategies
+    _safe_rmtree(temp_path)
+
+def _safe_rmtree(path):
+    """Safely remove directory tree on Windows."""
+    import stat
+    import time
+    import gc
+    
+    def handle_remove_readonly(func, path, exc):
+        """Handle read-only files on Windows."""
+        if os.path.exists(path):
+            # Make the file writable and try again
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+    
+    # Strategy 1: Normal removal
+    try:
+        shutil.rmtree(path)
+        return
+    except PermissionError:
+        pass
+    
+    # Strategy 2: Force garbage collection and retry
+    try:
+        gc.collect()
+        time.sleep(0.1)
+        shutil.rmtree(path)
+        return
+    except PermissionError:
+        pass
+    
+    # Strategy 3: Make files writable and retry
+    try:
+        shutil.rmtree(path, onerror=handle_remove_readonly)
+        return
+    except PermissionError:
+        pass
+    
+    # Strategy 4: Walk through and force remove each file
+    try:
+        for root, dirs, files in os.walk(path, topdown=False):
+            for name in files:
+                file_path = os.path.join(root, name)
+                try:
+                    os.chmod(file_path, stat.S_IWRITE)
+                    os.remove(file_path)
+                except:
+                    pass
+            for name in dirs:
+                dir_path = os.path.join(root, name)
+                try:
+                    os.chmod(dir_path, stat.S_IWRITE)
+                    os.rmdir(dir_path)
+                except:
+                    pass
+        os.rmdir(path)
+    except:
+        # If all else fails, just ignore the error
+        # The temp directory will be cleaned up by the OS eventually
+        pass
 
 
 @pytest.fixture
 def mock_neo4j_client():
     """Mock Neo4j client for testing."""
     client = Mock(spec=Neo4jClient)
+    # Mock both sync and async query methods
+    client.execute_query_sync.return_value = [{'id': 'test_repo', 'created': 1}]
     client.execute_query.return_value = [{'id': 'test_repo', 'created': 1}]
     client.close.return_value = None
     return client

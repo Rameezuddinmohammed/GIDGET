@@ -75,7 +75,7 @@ class PythonExtractor(BaseExtractor):
                     start_line, end_line, start_col, end_col = self._get_node_position(child)
                     module_name = self._get_node_text(module_node, content)
                     
-                    imports.append(ImportElement(
+                    import_element = ImportElement(
                         name=module_name,
                         file_path=file_path,
                         start_line=start_line,
@@ -85,7 +85,9 @@ class PythonExtractor(BaseExtractor):
                         language='python',
                         module_name=module_name,
                         is_from_import=False
-                    ))
+                    )
+                    import_element.signature_hash = import_element.generate_signature_hash()
+                    imports.append(import_element)
             
             elif child.type == 'import_from_statement':
                 # from module import names
@@ -105,7 +107,7 @@ class PythonExtractor(BaseExtractor):
                                 if name_node.type == 'dotted_name':
                                     imported_names.append(self._get_node_text(name_node, content))
                     
-                    imports.append(ImportElement(
+                    import_element = ImportElement(
                         name=f"from {module_name}",
                         file_path=file_path,
                         start_line=start_line,
@@ -116,7 +118,9 @@ class PythonExtractor(BaseExtractor):
                         module_name=module_name,
                         imported_names=imported_names,
                         is_from_import=True
-                    ))
+                    )
+                    import_element.signature_hash = import_element.generate_signature_hash()
+                    imports.append(import_element)
         
         return imports
     
@@ -152,7 +156,7 @@ class PythonExtractor(BaseExtractor):
                     # Extract docstring
                     docstring = self._extract_docstring(n, content)
                     
-                    classes.append(ClassElement(
+                    class_element = ClassElement(
                         name=class_name,
                         file_path=file_path,
                         start_line=start_line,
@@ -163,7 +167,9 @@ class PythonExtractor(BaseExtractor):
                         base_classes=base_classes,
                         methods=methods,
                         docstring=docstring
-                    ))
+                    )
+                    class_element.signature_hash = class_element.generate_signature_hash()
+                    classes.append(class_element)
             
             # Recursively visit children
             for child in n.children:
@@ -191,9 +197,11 @@ class PythonExtractor(BaseExtractor):
                             if child.type == 'identifier':
                                 parameters.append(self._get_node_text(child, content))
                             elif child.type == 'typed_parameter':
-                                param_name_node = child.child_by_field_name('pattern')
-                                if param_name_node:
-                                    parameters.append(self._get_node_text(param_name_node, content))
+                                # For typed parameters, the first child is usually the identifier
+                                for typed_child in child.children:
+                                    if typed_child.type == 'identifier':
+                                        parameters.append(self._get_node_text(typed_child, content))
+                                        break
                     
                     # Check if async
                     is_async = False
@@ -208,7 +216,7 @@ class PythonExtractor(BaseExtractor):
                     # Extract function calls
                     calls = self._extract_function_calls(n, content)
                     
-                    functions.append(FunctionElement(
+                    function_element = FunctionElement(
                         name=func_name,
                         file_path=file_path,
                         start_line=start_line,
@@ -220,7 +228,9 @@ class PythonExtractor(BaseExtractor):
                         is_async=is_async,
                         docstring=docstring,
                         calls=calls
-                    ))
+                    )
+                    function_element.signature_hash = function_element.generate_signature_hash()
+                    functions.append(function_element)
             
             # Recursively visit children
             for child in n.children:
@@ -233,7 +243,19 @@ class PythonExtractor(BaseExtractor):
         """Extract dependency relationships."""
         dependencies = []
         
-        def visit_node(n: Node):
+        def visit_node(n: Node, current_context: str = "<module>"):
+            # Update context when entering function or class
+            if n.type == 'function_definition':
+                name_node = n.child_by_field_name('name')
+                if name_node:
+                    func_name = self._get_node_text(name_node, content)
+                    current_context = func_name
+            elif n.type == 'class_definition':
+                name_node = n.child_by_field_name('name')
+                if name_node:
+                    class_name = self._get_node_text(name_node, content)
+                    current_context = class_name
+            
             if n.type == 'call':
                 # Function call dependency
                 func_node = n.child_by_field_name('function')
@@ -241,17 +263,21 @@ class PythonExtractor(BaseExtractor):
                     func_name = self._get_node_text(func_node, content)
                     start_line, _, _, _ = self._get_node_position(n)
                     
+                    # Extract just the function name (not full dotted path)
+                    if '.' in func_name:
+                        func_name = func_name.split('.')[-1]
+                    
                     dependencies.append(DependencyRelation(
-                        source_element="<current_context>",
+                        source_element=current_context,
                         target_element=func_name,
                         relation_type="calls",
                         file_path=file_path,
                         line_number=start_line
                     ))
             
-            # Recursively visit children
+            # Recursively visit children with current context
             for child in n.children:
-                visit_node(child)
+                visit_node(child, current_context)
         
         visit_node(node)
         return dependencies
@@ -332,18 +358,19 @@ class JavaScriptExtractor(BaseExtractor):
                 
                 # Extract imported names
                 imported_names = []
+                # Try to find import clause by field name first
                 import_clause = n.child_by_field_name('import')
-                if import_clause:
-                    # Handle different import patterns
-                    for child in import_clause.children:
-                        if child.type == 'identifier':
-                            imported_names.append(self._get_node_text(child, content))
-                        elif child.type == 'import_specifier':
-                            name_node = child.child_by_field_name('name')
-                            if name_node:
-                                imported_names.append(self._get_node_text(name_node, content))
+                if not import_clause:
+                    # Fallback: search by type
+                    for child in n.children:
+                        if child.type == 'import_clause':
+                            import_clause = child
+                            break
                 
-                imports.append(ImportElement(
+                if import_clause:
+                    self._extract_import_names(import_clause, content, imported_names)
+                
+                import_element = ImportElement(
                     name=f"import from {module_name}",
                     file_path=file_path,
                     start_line=start_line,
@@ -353,7 +380,9 @@ class JavaScriptExtractor(BaseExtractor):
                     language='javascript',
                     module_name=module_name,
                     imported_names=imported_names
-                ))
+                )
+                import_element.signature_hash = import_element.generate_signature_hash()
+                imports.append(import_element)
             
             for child in n.children:
                 visit_node(child)
@@ -361,23 +390,44 @@ class JavaScriptExtractor(BaseExtractor):
         visit_node(node)
         return imports
     
+    def _extract_import_names(self, node: Node, content: str, imported_names: List[str]):
+        """Recursively extract imported names from import clause."""
+        if node.type == 'identifier':
+            # Default import: import fs from 'fs'
+            imported_names.append(self._get_node_text(node, content))
+        elif node.type == 'import_specifier':
+            # Named import specifier: EventEmitter
+            imported_names.append(self._get_node_text(node, content))
+        else:
+            # Recurse into children
+            for child in node.children:
+                self._extract_import_names(child, content, imported_names)
+    
     def _extract_functions(self, node: Node, content: str, file_path: str) -> List[FunctionElement]:
         """Extract function definitions."""
         functions = []
         
         def visit_node(n: Node):
-            if n.type in ['function_declaration', 'function_expression', 'arrow_function']:
+            if n.type in ['function_declaration', 'function_expression', 'arrow_function', 'method_definition']:
                 name = self._get_function_name(n, content)
                 if name:
                     start_line, end_line, start_col, end_col = self._get_node_position(n)
                     
                     # Extract parameters
                     parameters = []
-                    params_node = n.child_by_field_name('parameters')
-                    if params_node:
-                        for child in params_node.children:
-                            if child.type == 'identifier':
-                                parameters.append(self._get_node_text(child, content))
+                    if n.type == 'method_definition':
+                        # For method definitions, look for formal_parameters
+                        for child in n.children:
+                            if child.type == 'formal_parameters':
+                                for param_child in child.children:
+                                    if param_child.type == 'identifier':
+                                        parameters.append(self._get_node_text(param_child, content))
+                    else:
+                        params_node = n.child_by_field_name('parameters')
+                        if params_node:
+                            for child in params_node.children:
+                                if child.type == 'identifier':
+                                    parameters.append(self._get_node_text(child, content))
                     
                     # Check if async
                     is_async = any(
@@ -385,7 +435,7 @@ class JavaScriptExtractor(BaseExtractor):
                         for child in n.children
                     )
                     
-                    functions.append(FunctionElement(
+                    function_element = FunctionElement(
                         name=name,
                         file_path=file_path,
                         start_line=start_line,
@@ -395,7 +445,9 @@ class JavaScriptExtractor(BaseExtractor):
                         language='javascript',
                         parameters=parameters,
                         is_async=is_async
-                    ))
+                    )
+                    function_element.signature_hash = function_element.generate_signature_hash()
+                    functions.append(function_element)
             
             for child in n.children:
                 visit_node(child)
@@ -416,9 +468,12 @@ class JavaScriptExtractor(BaseExtractor):
                     
                     # Extract superclass
                     base_classes = []
-                    superclass_node = n.child_by_field_name('superclass')
-                    if superclass_node:
-                        base_classes.append(self._get_node_text(superclass_node, content))
+                    # Look for class_heritage (extends clause)
+                    for child in n.children:
+                        if child.type == 'class_heritage':
+                            for heritage_child in child.children:
+                                if heritage_child.type == 'identifier':
+                                    base_classes.append(self._get_node_text(heritage_child, content))
                     
                     # Extract methods
                     methods = []
@@ -430,7 +485,7 @@ class JavaScriptExtractor(BaseExtractor):
                                 if method_name_node:
                                     methods.append(self._get_node_text(method_name_node, content))
                     
-                    classes.append(ClassElement(
+                    class_element = ClassElement(
                         name=class_name,
                         file_path=file_path,
                         start_line=start_line,
@@ -440,7 +495,9 @@ class JavaScriptExtractor(BaseExtractor):
                         language='javascript',
                         base_classes=base_classes,
                         methods=methods
-                    ))
+                    )
+                    class_element.signature_hash = class_element.generate_signature_hash()
+                    classes.append(class_element)
             
             for child in n.children:
                 visit_node(child)
@@ -451,6 +508,10 @@ class JavaScriptExtractor(BaseExtractor):
     def _get_function_name(self, node: Node, content: str) -> Optional[str]:
         """Extract function name from various function node types."""
         if node.type == 'function_declaration':
+            name_node = node.child_by_field_name('name')
+            if name_node:
+                return self._get_node_text(name_node, content)
+        elif node.type == 'method_definition':
             name_node = node.child_by_field_name('name')
             if name_node:
                 return self._get_node_text(name_node, content)
@@ -504,7 +565,7 @@ class TypeScriptExtractor(JavaScriptExtractor):
                             if child.type == 'identifier':
                                 base_classes.append(self._get_node_text(child, content))
                     
-                    interfaces.append(ClassElement(
+                    interface_element = ClassElement(
                         name=interface_name,
                         element_type=CodeElementType.INTERFACE,
                         file_path=file_path,
@@ -514,7 +575,9 @@ class TypeScriptExtractor(JavaScriptExtractor):
                         end_column=end_col,
                         language='typescript',
                         base_classes=base_classes
-                    ))
+                    )
+                    interface_element.signature_hash = interface_element.generate_signature_hash()
+                    interfaces.append(interface_element)
             
             for child in n.children:
                 visit_node(child)

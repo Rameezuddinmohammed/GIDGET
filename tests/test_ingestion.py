@@ -69,7 +69,7 @@ class TestIngestionPipeline:
     def test_get_repository_stats(self, ingestion_pipeline):
         """Test getting repository statistics."""
         # Mock the Neo4j query result
-        ingestion_pipeline.neo4j.execute_query.return_value = [{
+        ingestion_pipeline.neo4j.execute_query_sync.return_value = [{
             'commit_count': 10,
             'file_count': 25,
             'element_count': 150,
@@ -108,10 +108,13 @@ class TestGraphPopulator:
         result = populator.create_repository_node('test_repo', repo_info)
         
         assert result == 'test_repo'
-        mock_neo4j_client.execute_query.assert_called_once()
+        mock_neo4j_client.execute_query_sync.assert_called_once()
     
     def test_create_commit_node(self, mock_neo4j_client):
         """Test creating commit node."""
+        # Mock the specific return value for commit creation
+        mock_neo4j_client.execute_query_sync.return_value = [{'sha': 'abc123'}]
+        
         populator = GraphPopulator(mock_neo4j_client)
         
         commit_info = CommitInfo(
@@ -130,7 +133,7 @@ class TestGraphPopulator:
         result = populator.create_commit_node(commit_info, 'test_repo')
         
         assert result == 'abc123'
-        mock_neo4j_client.execute_query.assert_called_once()
+        mock_neo4j_client.execute_query_sync.assert_called_once()
     
     def test_ingest_parsed_files(self, mock_neo4j_client, sample_python_code):
         """Test ingesting parsed files."""
@@ -143,7 +146,7 @@ class TestGraphPopulator:
         parsed_file = parser.parse_content(sample_python_code, 'python', 'test.py')
         
         # Mock successful batch ingestion
-        mock_neo4j_client.execute_query.return_value = [{'created': 5}]
+        mock_neo4j_client.execute_query_sync.return_value = [{'created': 5}]
         
         stats = populator.ingest_parsed_files([parsed_file], 'commit123', 'test_repo')
         
@@ -157,12 +160,12 @@ class TestGraphPopulator:
         populator = GraphPopulator(mock_neo4j_client)
         
         # Mock cleanup result
-        mock_neo4j_client.execute_query.return_value = [{'deleted': 10}]
+        mock_neo4j_client.execute_query_sync.return_value = [{'deleted': 10}]
         
         deleted_count = populator.cleanup_old_data('test_repo', keep_commits=50)
         
         assert deleted_count == 10
-        mock_neo4j_client.execute_query.assert_called_once()
+        mock_neo4j_client.execute_query_sync.assert_called_once()
 
 
 class TestGraphBatch:
