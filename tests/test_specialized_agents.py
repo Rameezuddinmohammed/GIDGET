@@ -945,7 +945,7 @@ class TestVerificationAgentIndependentValidation:
         
         # Should have high confidence since claims were validated
         verification_finding = verification_findings[0]
-        assert verification_finding.confidence >= 0.8
+        assert verification_finding.confidence >= 0.9  # Updated to match Requirement 3.5 (90% threshold)
         
         # Should have no validation uncertainties
         uncertainties = agent.get_validation_uncertainties()
@@ -991,7 +991,7 @@ class TestVerificationAgentIndependentValidation:
         content_validation = {"claims_validated": 3, "claims_failed": 0}
         
         confidence = agent._calculate_validation_score(citation_validation, content_validation)
-        assert confidence >= 0.9, f"Expected high confidence (>=0.9), got {confidence}"
+        assert confidence >= 0.9, f"Expected high confidence (>=0.9), got {confidence}"  # Aligned with Requirement 3.5
         
         # Test Case 2: Partial validation (2/3) = Medium confidence  
         content_validation = {"claims_validated": 2, "claims_failed": 1}

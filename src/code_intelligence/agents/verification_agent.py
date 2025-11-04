@@ -134,13 +134,13 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
                 # Perform solution-level validation
                 solution_validation = await self._validate_complete_solution(all_findings, git_repo, repository_path, state)
                 
-                # QUALITY GATE: 80-90% confidence threshold for solutions
-                if solution_validation["confidence"] >= 0.8:
+                # QUALITY GATE: 90% confidence threshold for solutions (Requirement 3.5)
+                if solution_validation["confidence"] >= 0.9:
                     validation_status = "SOLUTION_APPROVED"
                     validation_message = f"✅ Solution validated with {solution_validation['confidence']:.1%} confidence"
                 else:
                     validation_status = "SOLUTION_NEEDS_REVIEW"
-                    validation_message = f"⚠️ Solution needs review - {solution_validation['confidence']:.1%} confidence (below 80% threshold)"
+                    validation_message = f"⚠️ Solution needs review - {solution_validation['confidence']:.1%} confidence (below 90% threshold)"
                     
                 # Create solution validation finding
                 solution_finding = self._create_finding(
@@ -151,7 +151,7 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
                     metadata={
                         "validation_status": validation_status,
                         "validation_details": solution_validation,
-                        "threshold_met": solution_validation["confidence"] >= 0.8
+                        "threshold_met": solution_validation["confidence"] >= 0.9
                     }
                 )
                 state.add_finding(self.config.name, solution_finding)
@@ -168,8 +168,8 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
                 verification_summary = self._generate_verification_summary(validation_results)
                 overall_confidence = verification_summary['average_confidence']
                 
-                # QUALITY GATE: 80% threshold for individual findings
-                if overall_confidence >= 0.8:
+                # QUALITY GATE: 90% threshold for individual findings (Requirement 3.5)
+                if overall_confidence >= 0.9:
                     # HIGH CONFIDENCE: Create approved report
                     verification_finding = self._create_finding(
                         finding_type="verified_report",
@@ -278,8 +278,8 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
             overall_score = self._calculate_validation_score(citation_validation, content_validation)
             validation_result["confidence_score"] = overall_score
             
-            # Determine validation result
-            if overall_score >= 0.8:
+            # Determine validation result (Requirement 3.5: 90% threshold)
+            if overall_score >= 0.9:
                 validation_result["validation_result"] = "valid"
                 validation_result["evidence_strength"] = "strong"
             elif overall_score >= 0.6:
@@ -1511,7 +1511,7 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
         final_score = (citation_score * citation_weight) + (primary_score * content_weight)
         
         # Apply confidence boost for high validation rates
-        if primary_score >= 0.8:  # 80% or more claims validated
+        if primary_score >= 0.9:  # 90% or more claims validated (Requirement 3.5)
             final_score = min(1.0, final_score * 1.1)  # 10% boost
         elif primary_score <= 0.3:  # 30% or fewer claims validated
             final_score = final_score * 0.8  # 20% penalty
@@ -1911,7 +1911,7 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
                 compatible_count = len([c for c in compatibility if c.get("compatible", False)])
                 compatibility_ratio = compatible_count / len(compatibility)
                 
-                if compatibility_ratio >= 0.8:  # 80% compatible
+                if compatibility_ratio >= 0.9:  # 90% compatible (aligned with Requirement 3.5)
                     score_components.append(0.3)  # 30% for high compatibility
                     validation["points"].append(f"✅ High compatibility: {compatible_count}/{len(compatibility)} dependencies available")
                 elif compatibility_ratio >= 0.5:  # 50% compatible
