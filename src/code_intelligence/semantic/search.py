@@ -203,7 +203,12 @@ class HybridSearchEngine:
     ) -> None:
         """Initialize hybrid search engine."""
         self.semantic_engine = semantic_engine or SemanticSearchEngine()
-        self.neo4j_client = neo4j_client or neo4j_client
+        # Import here to avoid circular imports
+        if neo4j_client is None:
+            from ..database.neo4j_client import neo4j_client as default_client
+            self.neo4j_client = default_client
+        else:
+            self.neo4j_client = neo4j_client
     
     async def hybrid_search(
         self,
@@ -273,9 +278,23 @@ class HybridSearchEngine:
                 limit=query.max_results
             )
             
-            # Execute query
-            # Note: This is a mock implementation
-            results = await self._execute_structural_query(cypher_query)
+            # Build parameters for the query
+            parameters = {
+                "repository_id": query.repository_id,
+                "limit": query.max_results
+            }
+            
+            # Add search term parameters
+            for i, term in enumerate(search_terms["general"]):
+                parameters[f"search_term_{i}"] = term
+            
+            # Add file pattern parameters
+            if query.file_patterns:
+                for i, pattern in enumerate(query.file_patterns):
+                    parameters[f"file_pattern_{i}"] = f".*{pattern}.*"
+            
+            # Execute the real Neo4j query with parameters
+            results = await self._execute_structural_query_with_params(cypher_query, parameters)
             
             return results
             
@@ -310,8 +329,8 @@ class HybridSearchEngine:
         file_patterns: Optional[List[str]],
         limit: int
     ) -> str:
-        """Build Cypher query for structural search."""
-        # Base query structure
+        """Build Cypher query for structural search with parameter binding."""
+        # Base query structure with parameter binding
         query_parts = [
             "MATCH (repo:Repository {id: $repository_id})",
             "MATCH (repo)-[:CONTAINS]->(file:File)",
@@ -326,20 +345,18 @@ class HybridSearchEngine:
         # Add search conditions
         conditions = []
         
-        # Name-based search
+        # Name-based search with parameterized queries
         if search_terms["general"]:
-            name_conditions = [
-                f"toLower(element.name) CONTAINS '{term}'"
-                for term in search_terms["general"]
-            ]
+            name_conditions = []
+            for i, term in enumerate(search_terms["general"]):
+                name_conditions.append(f"toLower(element.name) CONTAINS toLower($search_term_{i})")
             conditions.append(f"({' OR '.join(name_conditions)})")
         
         # File pattern filters
         if file_patterns:
-            pattern_conditions = [
-                f"file.path =~ '.*{pattern}.*'"
-                for pattern in file_patterns
-            ]
+            pattern_conditions = []
+            for i, pattern in enumerate(file_patterns):
+                pattern_conditions.append(f"file.path =~ $file_pattern_{i}")
             conditions.append(f"({' OR '.join(pattern_conditions)})")
         
         if conditions:
@@ -351,48 +368,76 @@ class HybridSearchEngine:
         # Return clause
         query_parts.extend([
             "RETURN element, file, repo",
-            f"LIMIT {limit}"
+            f"LIMIT $limit"
         ])
         
         return "\n".join(query_parts)
     
-    async def _execute_structural_query(self, cypher_query: str) -> List[Dict[str, Any]]:
-        """Execute structural query against Neo4j."""
-        # Mock implementation - would use actual Neo4j client
-        mock_results = [
-            {
-                "element": {
-                    "name": "process_data",
-                    "type": "function",
-                    "file_path": "src/data/processor.py",
-                    "start_line": 15,
-                    "end_line": 30,
-                    "code_snippet": "def process_data(data):\n    return processed_data"
-                },
-                "file": {
-                    "path": "src/data/processor.py",
-                    "language": "python"
-                },
-                "structural_score": 0.8
-            },
-            {
-                "element": {
-                    "name": "DataProcessor",
-                    "type": "class",
-                    "file_path": "src/data/processor.py",
-                    "start_line": 1,
-                    "end_line": 50,
-                    "code_snippet": "class DataProcessor:\n    def __init__(self):\n        pass"
-                },
-                "file": {
-                    "path": "src/data/processor.py",
-                    "language": "python"
-                },
-                "structural_score": 0.7
-            }
-        ]
-        
-        return mock_results
+    async def _execute_structural_query_with_params(
+        self, 
+        cypher_query: str, 
+        parameters: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """Execute structural query against Neo4j with parameters."""
+        try:
+            logger.debug(
+                "Executing Neo4j structural query with parameters", 
+                query=cypher_query,
+                param_count=len(parameters)
+            )
+            
+            # Execute the real Neo4j query with parameters
+            results = await self.neo4j_client.execute_query(cypher_query, parameters)
+            
+            # Format results to match the expected structure
+            formatted_results = []
+            for record in results:
+                element_data = record.get("element", {})
+                file_data = record.get("file", {})
+                
+                # Extract element properties (Neo4j nodes have properties)
+                if hasattr(element_data, 'get'):
+                    # Handle Neo4j node object
+                    element_props = dict(element_data)
+                else:
+                    # Handle dictionary
+                    element_props = element_data
+                
+                if hasattr(file_data, 'get'):
+                    # Handle Neo4j node object
+                    file_props = dict(file_data)
+                else:
+                    # Handle dictionary
+                    file_props = file_data
+                
+                formatted_result = {
+                    "element": {
+                        "name": element_props.get("name", "unknown"),
+                        "type": element_props.get("type", "unknown"),
+                        "file_path": element_props.get("file_path", file_props.get("path", "unknown")),
+                        "start_line": element_props.get("start_line", 1),
+                        "end_line": element_props.get("end_line", 1),
+                        "code_snippet": element_props.get("code_snippet", "# Code not available")
+                    },
+                    "file": {
+                        "path": file_props.get("path", element_props.get("file_path", "unknown")),
+                        "language": file_props.get("language", "unknown")
+                    },
+                    "structural_score": 0.8  # TODO: Implement real scoring based on query match
+                }
+                formatted_results.append(formatted_result)
+            
+            logger.info(
+                "Structural search completed",
+                query_length=len(cypher_query),
+                results_count=len(formatted_results)
+            )
+            
+            return formatted_results
+            
+        except Exception as e:
+            logger.error("Structural search failed", query=cypher_query, error=str(e))
+            return []  # Return empty list on failure
     
     async def _combine_results(
         self,

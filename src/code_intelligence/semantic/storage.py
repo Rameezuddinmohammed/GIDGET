@@ -158,41 +158,58 @@ class VectorStorage:
         threshold: float,
         file_patterns: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
-        """Execute the actual similarity search query."""
-        # This is a mock implementation since we don't have direct pgvector access
-        # In a real implementation, this would use SQL with pgvector operators
-        
-        # For now, return mock results that simulate pgvector behavior
-        mock_results = []
-        
-        # Simulate finding similar embeddings
-        for i in range(min(limit, 5)):  # Mock up to 5 results
-            similarity_score = max(0.5, 1.0 - (i * 0.1))  # Decreasing similarity
+        """Execute the actual similarity search query using pgvector."""
+        try:
+            # Map parameters for the SQL function
+            params = {
+                "query_embedding": query_embedding,
+                "repository_id_param": conditions.get("repository_id"),
+                "element_type_param": conditions.get("element_type", [None])[0] if conditions.get("element_type") else None,
+                "similarity_threshold": threshold,
+                "max_results": limit
+            }
             
-            if similarity_score >= threshold:
-                mock_result = {
-                    "id": f"mock_id_{i}",
-                    "repository_id": conditions["repository_id"],
-                    "file_path": f"src/example/file_{i}.py",
-                    "element_type": "function",
-                    "element_name": f"example_function_{i}",
-                    "code_snippet": f"def example_function_{i}():\n    return {i}",
-                    "embedding": query_embedding,  # Mock - would be actual stored embedding
-                    "similarity_score": similarity_score,
-                    "distance": 1.0 - similarity_score,
-                    "metadata": {
-                        "language": "python",
-                        "start_line": i * 10 + 1,
-                        "end_line": i * 10 + 3,
-                        "model_name": "mock-codebert",
-                        "confidence_score": 0.9
-                    },
-                    "commit_sha": "abc123def456",
-                    "created_at": datetime.now().isoformat()
-                }
-                mock_results.append(mock_result)
-        
-        return mock_results
+            logger.debug(
+                "Executing similarity search",
+                repository_id=params["repository_id_param"],
+                element_type=params["element_type_param"],
+                threshold=threshold,
+                limit=limit
+            )
+            
+            # Call the real pgvector function from supabase_schema.sql
+            response = self.client.client.rpc("search_similar_code", params).execute()
+            
+            # Process and return results
+            results = []
+            if response.data:
+                for item in response.data:
+                    # Re-format the SQL-style response to match the expected dictionary structure
+                    results.append({
+                        "id": item["id"],
+                        "repository_id": item["repository_id"],
+                        "file_path": item["file_path"],
+                        "element_type": item["element_type"],
+                        "element_name": item["element_name"],
+                        "code_snippet": item["code_snippet"],
+                        "similarity_score": item["similarity"],  # SQL fn returns 'similarity'
+                        "distance": 1.0 - item["similarity"],
+                        "metadata": item["metadata"],
+                        "commit_sha": item.get("commit_sha", "unknown"),
+                        "created_at": datetime.now().isoformat()
+                    })
+            
+            logger.info(
+                "Similarity search completed",
+                repository_id=params["repository_id_param"],
+                results_count=len(results)
+            )
+            
+            return results
+            
+        except Exception as e:
+            logger.error("Failed to execute real similarity search", error=str(e))
+            raise VectorStorageError(f"Real similarity search failed: {e}")
     
     def _result_to_code_element(self, result: Dict[str, Any]) -> CodeElement:
         """Convert search result to CodeElement."""
