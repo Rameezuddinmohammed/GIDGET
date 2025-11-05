@@ -12,8 +12,20 @@ from src.code_intelligence.api.models import QueryStatus, RepositoryStatus
 
 @pytest.fixture
 def client():
-    """Create test client."""
-    return TestClient(app)
+    """Create test client with proper test isolation."""
+    # Clear all global storage before each test to ensure isolation
+    from src.code_intelligence.api.routes.queries import query_storage
+    from src.code_intelligence.api.routes.repositories import repository_storage
+    
+    query_storage.clear()
+    repository_storage.clear()
+    
+    test_client = TestClient(app)
+    yield test_client
+    
+    # Clean up after test
+    query_storage.clear()
+    repository_storage.clear()
 
 
 @pytest.fixture
