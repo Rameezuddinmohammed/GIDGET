@@ -1,0 +1,241 @@
+# Alertmanager configuration for Code Intelligence System
+
+global:
+  smtp_smarthost: 'smtp.gmail.com:587'
+  smtp_from: 'alerts@code-intelligence.example.com'
+  smtp_auth_username: 'alerts@code-intelligence.example.com'
+  smtp_auth_password: 'your-app-password'
+  smtp_require_tls: true
+
+# Templates for notifications
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# Route tree for alerts
+route:
+  group_by: ['alertname', 'cluster', 'service']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 1h
+  receiver: 'default'
+  routes:
+    # Critical alerts go to on-call immediately
+    - match:
+        severity: critical
+      receiver: 'critical-alerts'
+      group_wait: 0s
+      repeat_interval: 5m
+      routes:
+        # Database critical alerts
+        - match:
+            component: database
+          receiver: 'database-critical'
+        # API critical alerts
+        - match:
+            component: api
+          receiver: 'api-critical'
+    
+    # Warning alerts go to team channels
+    - match:
+        severity: warning
+      receiver: 'warning-alerts'
+      group_interval: 5m
+      repeat_interval: 30m
+      routes:
+        # Agent-specific warnings
+        - match:
+            component: agents
+          receiver: 'agent-warnings'
+        # Database warnings
+        - match:
+            component: database
+          receiver: 'database-warnings'
+        # System warnings
+        - match:
+            component: system
+          receiver: 'system-warnings'
+    
+    # Info alerts go to monitoring channel
+    - match:
+        severity: info
+      receiver: 'info-alerts'
+      group_interval: 30m
+      repeat_interval: 4h
+    
+    # Business logic alerts
+    - match:
+        component: business
+      receiver: 'business-alerts'
+      group_interval: 15m
+      repeat_interval: 2h
+
+# Inhibition rules to suppress redundant alerts
+inhibit_rules:
+  # Suppress warning alerts when critical alerts are firing
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'instance']
+  
+  # Suppress individual service alerts when the whole system is down
+  - source_match:
+      alertname: 'APIDown'
+    target_match_re:
+      alertname: '.*High.*'
+    equal: ['instance']
+  
+  # Suppress database connection alerts when database is down
+  - source_match:
+      alertname: 'Neo4jDown'
+    target_match_re:
+      alertname: 'Neo4j.*'
+    equal: ['instance']
+  
+  - source_match:
+      alertname: 'PostgreSQLDown'
+    target_match_re:
+      alertname: 'PostgreSQL.*'
+    equal: ['instance']
+
+# Notification receivers
+receivers:
+  # Default receiver
+  - name: 'default'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#alerts'
+        title: 'Code Intelligence Alert'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+        color: 'warning'
+
+  # Critical alerts - immediate notification
+  - name: 'critical-alerts'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#critical-alerts'
+        title: 'CRITICAL: Code Intelligence System'
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Severity:* {{ .Labels.severity }}
+          *Component:* {{ .Labels.component }}
+          {{ if .Annotations.runbook_url }}*Runbook:* {{ .Annotations.runbook_url }}{{ end }}
+          {{ end }}
+        color: 'danger'
+        send_resolved: true
+    email_configs:
+      - to: 'oncall@code-intelligence.example.com'
+        subject: 'CRITICAL: Code Intelligence System Alert'
+        body: |
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Severity: {{ .Labels.severity }}
+          Component: {{ .Labels.component }}
+          {{ if .Annotations.runbook_url }}Runbook: {{ .Annotations.runbook_url }}{{ end }}
+          {{ end }}
+    pagerduty_configs:
+      - routing_key: 'your-pagerduty-integration-key'
+        description: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+
+  # Database critical alerts
+  - name: 'database-critical'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#database-alerts'
+        title: 'CRITICAL: Database Issue'
+        text: |
+          {{ range .Alerts }}
+          *Database Alert:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Instance:* {{ .Labels.instance }}
+          {{ if .Annotations.runbook_url }}*Runbook:* {{ .Annotations.runbook_url }}{{ end }}
+          {{ end }}
+        color: 'danger'
+    email_configs:
+      - to: 'dba@code-intelligence.example.com'
+        subject: 'CRITICAL: Database Alert'
+
+  # API critical alerts
+  - name: 'api-critical'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#api-alerts'
+        title: 'CRITICAL: API Issue'
+        text: |
+          {{ range .Alerts }}
+          *API Alert:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          {{ if .Annotations.runbook_url }}*Runbook:* {{ .Annotations.runbook_url }}{{ end }}
+          {{ end }}
+        color: 'danger'
+
+  # Warning alerts
+  - name: 'warning-alerts'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#warnings'
+        title: 'Warning: Code Intelligence System'
+        text: |
+          {{ range .Alerts }}
+          *Warning:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Component:* {{ .Labels.component }}
+          {{ end }}
+        color: 'warning'
+
+  # Agent warnings
+  - name: 'agent-warnings'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#agent-monitoring'
+        title: 'Agent Performance Warning'
+        text: |
+          {{ range .Alerts }}
+          *Agent:* {{ .Labels.agent_name }}
+          *Issue:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          {{ end }}
+        color: 'warning'
+
+  # Database warnings
+  - name: 'database-warnings'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#database-monitoring'
+        title: 'Database Performance Warning'
+        color: 'warning'
+
+  # System warnings
+  - name: 'system-warnings'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#system-monitoring'
+        title: 'System Resource Warning'
+        color: 'warning'
+
+  # Info alerts
+  - name: 'info-alerts'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#monitoring'
+        title: 'Code Intelligence Info'
+        color: 'good'
+
+  # Business alerts
+  - name: 'business-alerts'
+    slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#business-metrics'
+        title: 'Business Metrics Alert'
+        text: |
+          {{ range .Alerts }}
+          *Metric:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          {{ end }}
+        color: 'warning'
+    email_configs:
+      - to: 'product@code-intelligence.example.com'
+        subject: 'Business Metrics Alert'

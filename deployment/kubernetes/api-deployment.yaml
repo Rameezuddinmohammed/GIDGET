@@ -1,0 +1,139 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: code-intelligence-api
+  namespace: code-intelligence
+  labels:
+    app: code-intelligence-api
+    component: api
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: code-intelligence-api
+  template:
+    metadata:
+      labels:
+        app: code-intelligence-api
+        component: api
+    spec:
+      imagePullSecrets:
+        - name: registry-secret
+      containers:
+      - name: api
+        image: code-intelligence/api:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: NEO4J_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: code-intelligence-secrets
+              key: NEO4J_PASSWORD
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: code-intelligence-secrets
+              key: POSTGRES_PASSWORD
+        - name: SUPABASE_KEY
+          valueFrom:
+            secretKeyRef:
+              name: code-intelligence-secrets
+              key: SUPABASE_KEY
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: code-intelligence-secrets
+              key: JWT_SECRET
+        envFrom:
+        - configMapRef:
+            name: code-intelligence-config
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /api/v1/health/
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/v1/health/
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        volumeMounts:
+        - name: logs
+          mountPath: /app/logs
+        - name: data
+          mountPath: /app/data
+      volumes:
+      - name: logs
+        persistentVolumeClaim:
+          claimName: api-logs-pvc
+      - name: data
+        persistentVolumeClaim:
+          claimName: api-data-pvc
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: code-intelligence-api-service
+  namespace: code-intelligence
+  labels:
+    app: code-intelligence-api
+spec:
+  selector:
+    app: code-intelligence-api
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+    protocol: TCP
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: api-logs-pvc
+  namespace: code-intelligence
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: api-data-pvc
+  namespace: code-intelligence
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: standard

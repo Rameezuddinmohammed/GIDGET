@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: code-intelligence
+  labels:
+    name: code-intelligence
+    environment: production

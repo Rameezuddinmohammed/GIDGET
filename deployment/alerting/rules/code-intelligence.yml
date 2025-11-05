@@ -1,0 +1,292 @@
+# Prometheus alerting rules for Code Intelligence System
+
+groups:
+  - name: code-intelligence.api
+    rules:
+      # API Health Alerts
+      - alert: APIDown
+        expr: up{job="code-intelligence-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "Code Intelligence API is down"
+          description: "The Code Intelligence API has been down for more than 1 minute."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/api-down"
+
+      - alert: APIHighErrorRate
+        expr: rate(http_requests_total{job="code-intelligence-api",status=~"5.."}[5m]) / rate(http_requests_total{job="code-intelligence-api"}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "High error rate on Code Intelligence API"
+          description: "Error rate is {{ $value | humanizePercentage }} for the last 5 minutes."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/high-error-rate"
+
+      - alert: APIHighLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="code-intelligence-api"}[5m])) > 2
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "High latency on Code Intelligence API"
+          description: "95th percentile latency is {{ $value }}s for the last 5 minutes."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/high-latency"
+
+      - alert: APILowThroughput
+        expr: rate(http_requests_total{job="code-intelligence-api"}[5m]) < 1
+        for: 10m
+        labels:
+          severity: info
+          component: api
+        annotations:
+          summary: "Low throughput on Code Intelligence API"
+          description: "Request rate is {{ $value }} requests/second for the last 5 minutes."
+
+  - name: code-intelligence.agents
+    rules:
+      # Agent Performance Alerts
+      - alert: AgentHighFailureRate
+        expr: rate(agent_executions_failed_total[5m]) / rate(agent_executions_total[5m]) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+          component: agents
+        annotations:
+          summary: "High failure rate for agent {{ $labels.agent_name }}"
+          description: "Agent {{ $labels.agent_name }} has a failure rate of {{ $value | humanizePercentage }} for the last 5 minutes."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/agent-failures"
+
+      - alert: AgentSlowExecution
+        expr: histogram_quantile(0.95, rate(agent_execution_duration_seconds_bucket[5m])) > 300
+        for: 5m
+        labels:
+          severity: warning
+          component: agents
+        annotations:
+          summary: "Slow execution for agent {{ $labels.agent_name }}"
+          description: "Agent {{ $labels.agent_name }} 95th percentile execution time is {{ $value }}s."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/slow-agents"
+
+      - alert: AgentQueueBacklog
+        expr: agent_queue_size > 100
+        for: 5m
+        labels:
+          severity: warning
+          component: agents
+        annotations:
+          summary: "Agent queue backlog"
+          description: "Agent queue has {{ $value }} pending tasks."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/queue-backlog"
+
+      - alert: AgentMemoryUsage
+        expr: agent_memory_usage_bytes / agent_memory_limit_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          component: agents
+        annotations:
+          summary: "High memory usage for agent {{ $labels.agent_name }}"
+          description: "Agent {{ $labels.agent_name }} is using {{ $value | humanizePercentage }} of available memory."
+
+  - name: code-intelligence.database
+    rules:
+      # Neo4j Alerts
+      - alert: Neo4jDown
+        expr: up{job="neo4j"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "Neo4j database is down"
+          description: "Neo4j database has been down for more than 1 minute."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/neo4j-down"
+
+      - alert: Neo4jHighMemoryUsage
+        expr: neo4j_memory_used_bytes / neo4j_memory_total_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "Neo4j high memory usage"
+          description: "Neo4j memory usage is {{ $value | humanizePercentage }}."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/neo4j-memory"
+
+      - alert: Neo4jSlowQueries
+        expr: histogram_quantile(0.95, rate(neo4j_query_duration_seconds_bucket[5m])) > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "Neo4j slow queries"
+          description: "95th percentile query time is {{ $value }}s."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/slow-queries"
+
+      # PostgreSQL Alerts
+      - alert: PostgreSQLDown
+        expr: up{job="postgres"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: database
+        annotations:
+          summary: "PostgreSQL database is down"
+          description: "PostgreSQL database has been down for more than 1 minute."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/postgres-down"
+
+      - alert: PostgreSQLHighConnections
+        expr: pg_stat_database_numbackends / pg_settings_max_connections > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "PostgreSQL high connection usage"
+          description: "PostgreSQL is using {{ $value | humanizePercentage }} of available connections."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/postgres-connections"
+
+      - alert: PostgreSQLReplicationLag
+        expr: pg_replication_lag_seconds > 60
+        for: 5m
+        labels:
+          severity: warning
+          component: database
+        annotations:
+          summary: "PostgreSQL replication lag"
+          description: "PostgreSQL replication lag is {{ $value }}s."
+
+  - name: code-intelligence.cache
+    rules:
+      # Redis Alerts
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: cache
+        annotations:
+          summary: "Redis cache is down"
+          description: "Redis cache has been down for more than 1 minute."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/redis-down"
+
+      - alert: RedisHighMemoryUsage
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          component: cache
+        annotations:
+          summary: "Redis high memory usage"
+          description: "Redis memory usage is {{ $value | humanizePercentage }}."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/redis-memory"
+
+      - alert: RedisLowHitRate
+        expr: rate(redis_keyspace_hits_total[5m]) / (rate(redis_keyspace_hits_total[5m]) + rate(redis_keyspace_misses_total[5m])) < 0.8
+        for: 10m
+        labels:
+          severity: warning
+          component: cache
+        annotations:
+          summary: "Redis low hit rate"
+          description: "Redis hit rate is {{ $value | humanizePercentage }}."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/cache-hit-rate"
+
+  - name: code-intelligence.system
+    rules:
+      # System Resource Alerts
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is {{ $value }}% on {{ $labels.instance }}."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/high-cpu"
+
+      - alert: HighMemoryUsage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory usage is {{ $value | humanizePercentage }} on {{ $labels.instance }}."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/high-memory"
+
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) < 0.1
+        for: 5m
+        labels:
+          severity: critical
+          component: system
+        annotations:
+          summary: "Low disk space on {{ $labels.instance }}"
+          description: "Disk space is {{ $value | humanizePercentage }} full on {{ $labels.instance }}."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/disk-space"
+
+      - alert: HighDiskIOWait
+        expr: irate(node_cpu_seconds_total{mode="iowait"}[5m]) * 100 > 20
+        for: 5m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "High disk I/O wait on {{ $labels.instance }}"
+          description: "Disk I/O wait is {{ $value }}% on {{ $labels.instance }}."
+
+  - name: code-intelligence.business
+    rules:
+      # Business Logic Alerts
+      - alert: LowQuerySuccessRate
+        expr: rate(queries_completed_total[5m]) / rate(queries_submitted_total[5m]) < 0.95
+        for: 10m
+        labels:
+          severity: warning
+          component: business
+        annotations:
+          summary: "Low query success rate"
+          description: "Query success rate is {{ $value | humanizePercentage }}."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/query-success"
+
+      - alert: HighQueryLatency
+        expr: histogram_quantile(0.95, rate(query_duration_seconds_bucket[5m])) > 120
+        for: 5m
+        labels:
+          severity: warning
+          component: business
+        annotations:
+          summary: "High query processing latency"
+          description: "95th percentile query processing time is {{ $value }}s."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/query-latency"
+
+      - alert: RepositoryIngestionFailures
+        expr: rate(repository_ingestion_failures_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: business
+        annotations:
+          summary: "Repository ingestion failures"
+          description: "Repository ingestion failure rate is {{ $value }} failures/second."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/ingestion-failures"
+
+      - alert: LowCacheHitRate
+        expr: cache_hit_rate < 0.7
+        for: 10m
+        labels:
+          severity: info
+          component: business
+        annotations:
+          summary: "Low cache hit rate"
+          description: "Cache hit rate is {{ $value | humanizePercentage }}."
+          runbook_url: "https://docs.code-intelligence.example.com/runbooks/cache-optimization"

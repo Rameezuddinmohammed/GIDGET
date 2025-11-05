@@ -1,0 +1,359 @@
+name: Deploy Code Intelligence System
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - 'release/*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - dev
+          - staging
+          - production
+      deploy_type:
+        description: 'Deployment type'
+        required: true
+        default: 'kubernetes'
+        type: choice
+        options:
+          - docker
+          - kubernetes
+          - terraform
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # Test job
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [3.11]
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .
+        pip install pytest pytest-asyncio pytest-cov
+    
+    - name: Run tests
+      env:
+        POSTGRES_URL: postgresql://postgres:postgres@localhost:5432/test_db
+        REDIS_URL: redis://localhost:6379
+        NEO4J_URI: bolt://localhost:7687
+        NEO4J_USER: neo4j
+        NEO4J_PASSWORD: password
+      run: |
+        python -m pytest tests/ -v --cov=src --cov-report=xml
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+
+  # Build and push Docker images
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+    
+    - name: Build and push Docker image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        target: production
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64,linux/arm64
+
+  # Deploy to development
+  deploy-dev:
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop'
+    environment: development
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Deploy to Development
+      run: |
+        echo "Deploying to development environment"
+        # Add development deployment logic here
+        docker-compose -f docker-compose.dev.yml up -d
+    
+    - name: Run smoke tests
+      run: |
+        sleep 30
+        curl -f http://localhost:8000/api/v1/health/ || exit 1
+
+  # Deploy to staging
+  deploy-staging:
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event.inputs.environment == 'staging'
+    environment: staging
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-west-2
+    
+    - name: Configure kubectl
+      run: |
+        aws eks update-kubeconfig --region us-west-2 --name code-intelligence-staging
+    
+    - name: Deploy to Kubernetes
+      run: |
+        cd deployment/kubernetes
+        kubectl apply -f namespace.yaml
+        kubectl apply -f configmap.yaml
+        kubectl apply -f secrets.yaml
+        kubectl apply -f databases.yaml
+        kubectl apply -f api-deployment.yaml
+        kubectl apply -f ingress.yaml
+        
+        # Wait for deployment
+        kubectl rollout status deployment/code-intelligence-api -n code-intelligence --timeout=300s
+    
+    - name: Run integration tests
+      run: |
+        # Wait for services to be ready
+        sleep 60
+        
+        # Run integration tests against staging
+        python -m pytest tests/test_end_to_end_integration.py -v \
+          --api-url=https://api.staging.code-intelligence.example.com
+
+  # Deploy to production
+  deploy-production:
+    needs: [test, build, deploy-staging]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/heads/release/') || github.event.inputs.environment == 'production'
+    environment: production
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-west-2
+    
+    - name: Deploy infrastructure with Terraform
+      if: github.event.inputs.deploy_type == 'terraform'
+      run: |
+        cd deployment/terraform
+        terraform init
+        terraform plan -var="environment=production" -out=tfplan
+        terraform apply tfplan
+    
+    - name: Configure kubectl
+      run: |
+        aws eks update-kubeconfig --region us-west-2 --name code-intelligence-production
+    
+    - name: Deploy to Production Kubernetes
+      run: |
+        cd deployment/kubernetes
+        
+        # Apply configurations
+        kubectl apply -f namespace.yaml
+        kubectl apply -f configmap.yaml
+        kubectl apply -f secrets.yaml
+        
+        # Deploy databases first
+        kubectl apply -f databases.yaml
+        kubectl wait --for=condition=ready pod -l app=postgres -n code-intelligence --timeout=300s
+        kubectl wait --for=condition=ready pod -l app=neo4j -n code-intelligence --timeout=300s
+        kubectl wait --for=condition=ready pod -l app=redis -n code-intelligence --timeout=300s
+        
+        # Deploy application
+        kubectl apply -f api-deployment.yaml
+        kubectl rollout status deployment/code-intelligence-api -n code-intelligence --timeout=600s
+        
+        # Deploy ingress
+        kubectl apply -f ingress.yaml
+    
+    - name: Run production smoke tests
+      run: |
+        # Wait for services to be fully ready
+        sleep 120
+        
+        # Basic health check
+        curl -f https://api.code-intelligence.example.com/api/v1/health/ || exit 1
+        
+        # Run critical path tests
+        python -m pytest tests/test_system_health_integration.py::TestSystemHealthMonitoring::test_basic_health_check_integration -v \
+          --api-url=https://api.code-intelligence.example.com
+    
+    - name: Notify deployment success
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        channel: '#deployments'
+        text: 'Production deployment completed successfully! :rocket:'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # Rollback job
+  rollback:
+    runs-on: ubuntu-latest
+    if: failure() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/'))
+    needs: [deploy-staging, deploy-production]
+    environment: production
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: us-west-2
+    
+    - name: Configure kubectl
+      run: |
+        aws eks update-kubeconfig --region us-west-2 --name code-intelligence-production
+    
+    - name: Rollback deployment
+      run: |
+        # Rollback Kubernetes deployments
+        kubectl rollout undo deployment/code-intelligence-api -n code-intelligence
+        kubectl rollout status deployment/code-intelligence-api -n code-intelligence --timeout=300s
+    
+    - name: Notify rollback
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        channel: '#deployments'
+        text: 'Production deployment failed and was rolled back! :warning:'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # Security scanning
+  security:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name != 'pull_request'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ needs.build.outputs.image-tag }}
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+    
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+    
+    - name: Run Bandit security linter
+      run: |
+        pip install bandit
+        bandit -r src/ -f json -o bandit-report.json || true
+    
+    - name: Upload security scan results
+      uses: actions/upload-artifact@v3
+      with:
+        name: security-scan-results
+        path: |
+          trivy-results.sarif
+          bandit-report.json

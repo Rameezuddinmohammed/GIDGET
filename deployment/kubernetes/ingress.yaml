@@ -1,0 +1,105 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: code-intelligence-ingress
+  namespace: code-intelligence
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/websocket-services: "code-intelligence-api-service"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+  - hosts:
+    - api.code-intelligence.example.com
+    - app.code-intelligence.example.com
+    secretName: code-intelligence-tls
+  rules:
+  - host: api.code-intelligence.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: code-intelligence-api-service
+            port:
+              number: 8000
+  - host: app.code-intelligence.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: code-intelligence-web-service
+            port:
+              number: 80
+
+---
+# Internal ingress for admin/monitoring services
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: code-intelligence-admin-ingress
+  namespace: code-intelligence
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: admin-auth
+    nginx.ingress.kubernetes.io/auth-realm: "Code Intelligence Admin"
+spec:
+  tls:
+  - hosts:
+    - admin.code-intelligence.example.com
+    - grafana.code-intelligence.example.com
+    - neo4j.code-intelligence.example.com
+    secretName: code-intelligence-admin-tls
+  rules:
+  - host: admin.code-intelligence.example.com
+    http:
+      paths:
+      - path: /metrics
+        pathType: Prefix
+        backend:
+          service:
+            name: prometheus-service
+            port:
+              number: 9090
+  - host: grafana.code-intelligence.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: grafana-service
+            port:
+              number: 3000
+  - host: neo4j.code-intelligence.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: neo4j-service
+            port:
+              number: 7474
+
+---
+# Basic auth secret for admin access
+apiVersion: v1
+kind: Secret
+metadata:
+  name: admin-auth
+  namespace: code-intelligence
+type: Opaque
+data:
+  # Generated with: htpasswd -nb admin your-password | base64 -w 0
+  auth: YWRtaW46JGFwcjEkSDZ1YjJpNzAkNGNIeUdWUzJoVVVJNzNFc1ZxdGZuLgo=  # admin:admin

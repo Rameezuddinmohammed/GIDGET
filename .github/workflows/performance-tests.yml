@@ -1,0 +1,263 @@
+name: Performance Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run performance tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      test_suite:
+        description: 'Test suite to run'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - load
+          - regression
+          - resource
+          - database
+      include_slow:
+        description: 'Include slow tests (scalability)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  performance-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    strategy:
+      matrix:
+        python-version: [3.11]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .
+        pip install pytest pytest-asyncio pytest-mock httpx psutil
+    
+    - name: Create performance test directories
+      run: |
+        mkdir -p performance_test_results
+        mkdir -p .github/performance_baselines
+    
+    - name: Load performance baselines
+      uses: actions/cache@v3
+      with:
+        path: performance_baselines.json
+        key: performance-baselines-${{ runner.os }}-${{ hashFiles('tests/test_performance_regression.py') }}
+        restore-keys: |
+          performance-baselines-${{ runner.os }}-
+    
+    - name: Establish baselines (if not exists)
+      run: |
+        if [ ! -f performance_baselines.json ]; then
+          echo "Establishing performance baselines..."
+          python tests/performance_test_runner.py --establish-baselines
+        else
+          echo "Using existing performance baselines"
+        fi
+    
+    - name: Run performance tests
+      run: |
+        python tests/performance_test_runner.py \
+          --suite ${{ github.event.inputs.test_suite || 'all' }} \
+          ${{ github.event.inputs.include_slow == 'true' && '--include-slow' || '' }} \
+          --ci-mode \
+          --output-dir performance_test_results
+      env:
+        PYTHONPATH: ${{ github.workspace }}
+    
+    - name: Upload performance test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: performance-test-results-${{ matrix.python-version }}
+        path: |
+          performance_test_results/
+          performance_baselines.json
+        retention-days: 30
+    
+    - name: Comment PR with performance results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const path = 'performance_test_results/latest_performance_results.json';
+          
+          if (fs.existsSync(path)) {
+            const results = JSON.parse(fs.readFileSync(path, 'utf8'));
+            const summary = results.summary;
+            
+            const comment = `## 🚀 Performance Test Results
+            
+            | Metric | Value |
+            |--------|-------|
+            | Total Suites | ${summary.total_suites} |
+            | Passed | ${summary.passed_suites} ✅ |
+            | Failed | ${summary.failed_suites} ${summary.failed_suites > 0 ? '❌' : '✅'} |
+            | Duration | ${summary.total_duration_seconds.toFixed(1)}s |
+            | Regressions | ${summary.performance_regressions} ${summary.performance_regressions > 0 ? '⚠️' : '✅'} |
+            
+            ### Test Suite Details
+            
+            ${Object.entries(results.test_suites).map(([name, result]) => 
+              `- ${result.success ? '✅' : '❌'} **${name}**: ${result.duration_seconds.toFixed(1)}s (${result.tests_passed || 0} passed, ${result.tests_failed || 0} failed)`
+            ).join('\n')}
+            
+            ${summary.performance_regressions > 0 ? '⚠️ **Performance regressions detected!** Please review the changes.' : ''}
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+          }
+    
+    - name: Fail on performance regressions
+      if: always()
+      run: |
+        if [ -f performance_test_results/latest_performance_results.json ]; then
+          regressions=$(python -c "
+          import json
+          with open('performance_test_results/latest_performance_results.json') as f:
+              data = json.load(f)
+          print(data['summary']['performance_regressions'])
+          ")
+          
+          if [ "$regressions" -gt 0 ]; then
+            echo "❌ Performance regressions detected: $regressions"
+            exit 1
+          fi
+        fi
+
+  performance-comparison:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    needs: performance-tests
+    
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Download performance results
+      uses: actions/download-artifact@v3
+      with:
+        name: performance-test-results-3.11
+        path: current_results/
+    
+    - name: Get baseline performance results
+      run: |
+        # Try to get performance results from main branch
+        git checkout origin/main -- performance_test_results/latest_performance_results.json || echo "No baseline results found"
+        if [ -f performance_test_results/latest_performance_results.json ]; then
+          mv performance_test_results/latest_performance_results.json baseline_results.json
+        fi
+    
+    - name: Compare performance results
+      if: hashFiles('baseline_results.json') != ''
+      run: |
+        python -c "
+        import json
+        import sys
+        
+        try:
+            with open('baseline_results.json') as f:
+                baseline = json.load(f)
+            with open('current_results/latest_performance_results.json') as f:
+                current = json.load(f)
+            
+            print('## Performance Comparison')
+            print('| Metric | Baseline | Current | Change |')
+            print('|--------|----------|---------|--------|')
+            
+            baseline_duration = baseline['summary']['total_duration_seconds']
+            current_duration = current['summary']['total_duration_seconds']
+            duration_change = ((current_duration - baseline_duration) / baseline_duration) * 100
+            
+            print(f'| Total Duration | {baseline_duration:.1f}s | {current_duration:.1f}s | {duration_change:+.1f}% |')
+            
+            baseline_regressions = baseline['summary']['performance_regressions']
+            current_regressions = current['summary']['performance_regressions']
+            
+            print(f'| Regressions | {baseline_regressions} | {current_regressions} | {current_regressions - baseline_regressions:+d} |')
+            
+            # Compare individual test suites
+            for suite_name in current['test_suites']:
+                if suite_name in baseline['test_suites']:
+                    baseline_time = baseline['test_suites'][suite_name]['duration_seconds']
+                    current_time = current['test_suites'][suite_name]['duration_seconds']
+                    change = ((current_time - baseline_time) / baseline_time) * 100
+                    print(f'| {suite_name} | {baseline_time:.1f}s | {current_time:.1f}s | {change:+.1f}% |')
+            
+        except Exception as e:
+            print(f'Error comparing results: {e}')
+            sys.exit(1)
+        " > performance_comparison.md
+        
+        cat performance_comparison.md
+
+  benchmark-tracking:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: performance-tests
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download performance results
+      uses: actions/download-artifact@v3
+      with:
+        name: performance-test-results-3.11
+        path: performance_results/
+    
+    - name: Store performance benchmarks
+      uses: benchmark-action/github-action-benchmark@v1
+      with:
+        tool: 'customSmallerIsBetter'
+        output-file-path: performance_results/latest_performance_results.json
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        auto-push: true
+        comment-on-alert: true
+        alert-threshold: '150%'
+        fail-on-alert: false
+    
+    - name: Update performance baselines
+      run: |
+        # Copy current results as new baselines for future comparisons
+        if [ -f performance_results/latest_performance_results.json ]; then
+          cp performance_results/latest_performance_results.json performance_baselines.json
+          
+          # Commit updated baselines
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add performance_baselines.json
+          git commit -m "Update performance baselines [skip ci]" || echo "No changes to commit"
+          git push || echo "No changes to push"
+        fi
