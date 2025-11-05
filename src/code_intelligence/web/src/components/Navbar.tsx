@@ -1,7 +1,7 @@
 import React from 'react';
 import { AppBar, Toolbar, Typography, Button, Box, Chip } from '@mui/material';
 import { Link, useLocation } from 'react-router-dom';
-import { Code, Dashboard, Search, Storage } from '@mui/icons-material';
+import { Code, Dashboard, Search, Storage, AdminPanelSettings } from '@mui/icons-material';
 import { useWebSocket } from '../contexts/WebSocketContext';
 
 const Navbar: React.FC = () => {
@@ -12,6 +12,7 @@ const Navbar: React.FC = () => {
     { path: '/', label: 'Dashboard', icon: <Dashboard /> },
     { path: '/query', label: 'Query', icon: <Search /> },
     { path: '/repositories', label: 'Repositories', icon: <Storage /> },
+    { path: '/admin', label: 'Admin', icon: <AdminPanelSettings /> },
   ];
 
   return (

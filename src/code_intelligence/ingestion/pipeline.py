@@ -13,6 +13,7 @@ from ..parsing.parser import MultiLanguageParser
 from .graph_populator import GraphPopulator
 from .models import IngestionJob, IngestionStatus
 from ..exceptions import CodeIntelligenceError
+from ..caching.invalidation_service import invalidation_service
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +178,9 @@ class IngestionPipeline:
             try:
                 # Create commit node
                 self.graph_populator.create_commit_node(commit_info, job.repository_id)
+                
+                # Trigger cache invalidation for this commit
+                self._invalidate_cache_for_commit(commit_info, job.repository_id)
                 
                 # Delta-aware processing: only parse changed files
                 if commit_info.file_changes:
@@ -422,3 +426,47 @@ class IngestionPipeline:
             'element_count': 0,
             'supported_languages': []
         }
+    
+    def _invalidate_cache_for_commit(self, commit_info: CommitInfo, repository_id: str):
+        """Invalidate cache entries affected by a new commit."""
+        try:
+            import asyncio
+            
+            # Extract modified file paths
+            modified_files = []
+            if commit_info.file_changes:
+                modified_files = [
+                    fc.file_path for fc in commit_info.file_changes 
+                    if fc.change_type in [ChangeType.ADDED, ChangeType.MODIFIED]
+                ]
+            
+            # Trigger cache invalidation asynchronously
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # If we're in an async context, schedule the task
+                    asyncio.create_task(invalidation_service.handle_commit_ingestion(
+                        repository_id=repository_id,
+                        commit_sha=commit_info.sha,
+                        modified_files=modified_files,
+                        commit_message=commit_info.message
+                    ))
+                else:
+                    # If not in async context, run it
+                    loop.run_until_complete(invalidation_service.handle_commit_ingestion(
+                        repository_id=repository_id,
+                        commit_sha=commit_info.sha,
+                        modified_files=modified_files,
+                        commit_message=commit_info.message
+                    ))
+            except RuntimeError:
+                # No event loop, create one
+                asyncio.run(invalidation_service.handle_commit_ingestion(
+                    repository_id=repository_id,
+                    commit_sha=commit_info.sha,
+                    modified_files=modified_files,
+                    commit_message=commit_info.message
+                ))
+            
+        except Exception as e:
+            logger.warning(f"Cache invalidation failed for commit {commit_info.sha}: {e}")

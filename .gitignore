@@ -181,11 +181,19 @@ temp/
 performance_test_results/
 db_validation_report_*.json
 
-# Generated reports
+# Generated reports and temporary files
 *_REPORT.md
 *_SUMMARY.md
 *_ANALYSIS.md
 *_COMPLETE.md
+*_VALIDATION*.md
+*_IMPLEMENTATION*.md
+*_VERIFICATION*.md
+*_FIXES*.md
+TASK_*.md
+*CACHING*.md
+FINAL_PUSH_SUMMARY.md
+SUPABASE_USAGE_EXPLANATION.md
 
 # Backup files
 *.bak

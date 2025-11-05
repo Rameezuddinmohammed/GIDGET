@@ -86,6 +86,37 @@ class TestHealthEndpoints:
         assert "status" in data
         assert "services" in data
         assert "timestamp" in data
+    
+    def test_metrics_endpoint(self, client):
+        """Test metrics endpoint."""
+        response = client.get("/api/v1/health/metrics")
+        assert response.status_code == 200
+        
+        data = response.json()
+        assert "health" in data
+        assert "system" in data
+        assert "cache" in data
+        assert "timestamp" in data
+        
+        # Check health metrics structure
+        health = data["health"]
+        assert "status" in health
+        assert "success_rate" in health
+        assert "avg_response_time_ms" in health
+        assert "active_executions" in health
+        
+        # Check system metrics structure
+        system = data["system"]
+        assert "total_executions" in system
+        assert "success_rate" in system
+        assert "avg_duration_ms" in system
+        assert "agents" in system
+        
+        # Check cache metrics structure
+        cache = data["cache"]
+        assert "cache_hits" in cache
+        assert "cache_misses" in cache
+        assert "cache_hit_rate" in cache
 
 
 class TestQueryEndpoints:

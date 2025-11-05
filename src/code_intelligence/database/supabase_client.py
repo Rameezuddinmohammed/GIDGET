@@ -337,6 +337,67 @@ class SupabaseClient:
         except Exception as e:
             logger.error("Failed to cleanup expired cache", error=str(e))
             raise SupabaseError(f"Cache cleanup failed: {e}")
+    
+    async def invalidate_repository_cache(self, repository_id: str) -> int:
+        """Invalidate all cache entries for a specific repository."""
+        try:
+            result = self.client.table("analysis_cache").delete().eq(
+                "repository_id", repository_id
+            ).execute()
+            
+            count = len(result.data) if result.data else 0
+            logger.info("Invalidated repository cache", repository_id=repository_id, count=count)
+            return count
+        except Exception as e:
+            logger.error("Failed to invalidate repository cache", repository_id=repository_id, error=str(e))
+            raise SupabaseError(f"Repository cache invalidation failed: {e}")
+    
+    async def invalidate_cache_by_pattern(self, query_pattern: str) -> int:
+        """Invalidate cache entries matching a query pattern."""
+        try:
+            # Use ILIKE for case-insensitive pattern matching
+            result = self.client.table("analysis_cache").delete().ilike(
+                "query_text", f"%{query_pattern}%"
+            ).execute()
+            
+            count = len(result.data) if result.data else 0
+            logger.info("Invalidated pattern cache", pattern=query_pattern, count=count)
+            return count
+        except Exception as e:
+            logger.error("Failed to invalidate pattern cache", pattern=query_pattern, error=str(e))
+            raise SupabaseError(f"Pattern cache invalidation failed: {e}")
+    
+    async def get_cache_statistics(self) -> Dict[str, Any]:
+        """Get cache usage statistics."""
+        try:
+            # Get total cache entries
+            total_result = self.client.table("analysis_cache").select("id", count="exact").execute()
+            total_entries = total_result.count or 0
+            
+            # Get expired entries
+            expired_result = self.client.table("analysis_cache").select("id", count="exact").lt(
+                "expires_at", datetime.now().isoformat()
+            ).execute()
+            expired_entries = expired_result.count or 0
+            
+            # Get recent entries (last 24 hours)
+            recent_cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+            recent_result = self.client.table("analysis_cache").select("id", count="exact").gt(
+                "created_at", recent_cutoff
+            ).execute()
+            recent_entries = recent_result.count or 0
+            
+            return {
+                "total_entries": total_entries,
+                "expired_entries": expired_entries,
+                "active_entries": total_entries - expired_entries,
+                "recent_entries_24h": recent_entries,
+                "cache_utilization": (total_entries - expired_entries) / max(1, total_entries)
+            }
+            
+        except Exception as e:
+            logger.error("Failed to get cache statistics", error=str(e))
+            raise SupabaseError(f"Cache statistics retrieval failed: {e}")
 
 
 # Global client instance

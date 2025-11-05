@@ -6,6 +6,7 @@ import Dashboard from './pages/Dashboard';
 import QueryPage from './pages/QueryPage';
 import RepositoriesPage from './pages/RepositoriesPage';
 import QueryResultsPage from './pages/QueryResultsPage';
+import AdminPage from './pages/AdminPage';
 import { WebSocketProvider } from './contexts/WebSocketContext';
 
 function App() {
@@ -19,6 +20,7 @@ function App() {
             <Route path="/query" element={<QueryPage />} />
             <Route path="/repositories" element={<RepositoriesPage />} />
             <Route path="/query/:queryId" element={<QueryResultsPage />} />
+            <Route path="/admin" element={<AdminPage />} />
           </Routes>
         </Box>
       </Box>

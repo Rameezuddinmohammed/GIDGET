@@ -10,6 +10,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from pydantic import BaseModel
 
 from ..logging import get_logger
+from ..monitoring.agent_monitor import agent_monitor
 from .state import AgentState, AgentFinding
 from .base import BaseAgent
 
@@ -279,6 +280,64 @@ class AgentOrchestrator:
             avg_confidence = sum(f.confidence for f in all_findings) / len(all_findings)
             state.verification["overall_confidence"] = avg_confidence
             
+        # Store final result in cache if we have a developer orchestrator
+        try:
+            from .developer_query_orchestrator import DeveloperQueryOrchestrator
+            
+            # Check if we have a developer orchestrator registered
+            dev_orchestrator = None
+            for agent_name, agent in self.agents.items():
+                if isinstance(agent, DeveloperQueryOrchestrator):
+                    dev_orchestrator = agent
+                    break
+                    
+            if dev_orchestrator:
+                await dev_orchestrator.store_final_result(state)
+            else:
+                # Fallback: store result directly using cache manager
+                from ..caching.cache_manager import cache_manager
+                
+                query = state.query.get("original", "")
+                repository_id = state.repository.get("id") or state.repository.get("path", "")
+                
+                if query and repository_id and all_findings:
+                    # Prepare result data
+                    result_data = {
+                        "findings": {},
+                        "analysis": state.analysis,
+                        "verification": state.verification,
+                        "query_metadata": {
+                            "session_id": state.session_id,
+                            "agent_count": len(state.findings)
+                        }
+                    }
+                    
+                    # Serialize findings by agent
+                    for agent_name, findings in state.findings.items():
+                        result_data["findings"][agent_name] = [
+                            {
+                                "finding_type": f.finding_type,
+                                "content": f.content,
+                                "confidence": f.confidence,
+                                "metadata": f.metadata,
+                                "citations": f.citations
+                            }
+                            for f in findings
+                        ]
+                    
+                    # Store in cache if suitable
+                    if await cache_manager.should_cache_result(avg_confidence, result_data):
+                        await cache_manager.store_result(
+                            query=query,
+                            repository_id=repository_id,
+                            result_data=result_data,
+                            confidence_score=avg_confidence,
+                            options=state.query.get("options", {})
+                        )
+                        
+        except Exception as e:
+            logger.warning(f"Failed to store final result in cache: {str(e)}")
+            
         logger.info(f"Finalized results for session: {state.session_id}")
         return state
         
@@ -300,17 +359,56 @@ class AgentOrchestrator:
         agent_name: str, 
         state: AgentState
     ) -> AgentState:
-        """Execute an agent with timeout handling."""
+        """Execute an agent with timeout handling and monitoring."""
         agent = self.agents[agent_name]
+        
+        # Start monitoring execution
+        execution_id = await agent_monitor.start_execution(agent_name, state.session_id)
         
         try:
             result = await asyncio.wait_for(
                 agent.execute(state),
                 timeout=self.config.agent_timeout_seconds
             )
+            
+            # Record successful execution
+            findings_count = len(result.findings.get(agent_name, []))
+            avg_confidence = 0.0
+            if findings_count > 0:
+                agent_findings = result.findings.get(agent_name, [])
+                avg_confidence = sum(f.confidence for f in agent_findings) / findings_count
+                
+            await agent_monitor.record_execution(
+                execution_id=execution_id,
+                success=True,
+                findings_count=findings_count,
+                confidence_score=avg_confidence
+            )
+            
             return result
+            
         except asyncio.TimeoutError:
             state.add_error(f"Agent {agent_name} timed out", agent_name)
+            
+            # Record timeout
+            await agent_monitor.record_execution(
+                execution_id=execution_id,
+                success=False,
+                error_message="Agent execution timed out"
+            )
+            
+            return state
+            
+        except Exception as e:
+            state.add_error(f"Agent {agent_name} failed: {str(e)}", agent_name)
+            
+            # Record failure
+            await agent_monitor.record_execution(
+                execution_id=execution_id,
+                success=False,
+                error_message=str(e)
+            )
+            
             return state
             
     def _route_after_init(self, state: AgentState) -> str:

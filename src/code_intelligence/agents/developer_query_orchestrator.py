@@ -1,13 +1,16 @@
 """Developer Query Orchestrator for handling real-world developer scenarios."""
 
+import hashlib
 import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..database.supabase_client import supabase_client
+from ..caching.cache_manager import cache_manager
+from ..monitoring.agent_monitor import agent_monitor
 from ..logging import get_logger
 from .base import BaseAgent, AgentConfig, PromptTemplate
 from .state import AgentState, ParsedQuery, QueryScope, CodeElement
-from .solution_verifier import SolutionVerifier
 
 
 logger = get_logger(__name__)
@@ -25,18 +28,34 @@ class DeveloperQueryOrchestrator(BaseAgent):
             )
         super().__init__(config, **kwargs)
         
-        # Initialize solution verifier
-        self.solution_verifier = SolutionVerifier()
-        
     async def execute(self, state: AgentState) -> AgentState:
-        """Execute developer-focused orchestration."""
+        """Execute developer-focused orchestration with intelligent caching."""
+        execution_id = await agent_monitor.start_execution(
+            self.config.name, state.session_id
+        )
+        
         self._log_execution_start(state)
         
         if not self._validate_state(state):
             state.add_error("Invalid state for developer orchestrator", self.config.name)
+            await agent_monitor.record_execution(
+                execution_id, False, error_message="Invalid state"
+            )
             return state
             
         try:
+            # Check for cached results first
+            cached_result = await self._check_cache(state)
+            if cached_result:
+                logger.info("Using cached result for developer query")
+                state = await self._apply_cached_result(state, cached_result)
+                await agent_monitor.record_execution(
+                    execution_id, True, 
+                    findings_count=len(state.get_all_findings()),
+                    confidence_score=cached_result.get("confidence_score", 0.0)
+                )
+                return state
+            
             # Parse developer query for actionable requirements
             developer_intent = await self._parse_developer_query(state)
             state.query["developer_intent"] = developer_intent
@@ -65,12 +84,24 @@ class DeveloperQueryOrchestrator(BaseAgent):
             state.add_finding(self.config.name, finding)
             
             self._log_execution_end(state, True)
+            
+            await agent_monitor.record_execution(
+                execution_id, True,
+                findings_count=len(state.get_all_findings()),
+                confidence_score=finding.confidence
+            )
+            
             return state
             
         except Exception as e:
             self.logger.error(f"Developer orchestrator execution failed: {str(e)}")
             state.add_error(f"Developer orchestrator failed: {str(e)}", self.config.name)
             self._log_execution_end(state, False)
+            
+            await agent_monitor.record_execution(
+                execution_id, False, error_message=str(e)
+            )
+            
             return state
             
     async def _parse_developer_query(self, state: AgentState) -> Dict[str, Any]:
@@ -255,19 +286,25 @@ class DeveloperQueryOrchestrator(BaseAgent):
     async def validate_solution_delivery(self, state: AgentState) -> Dict[str, Any]:
         """Validate if the solution meets developer requirements for delivery."""
         
-        # Use solution verifier
-        verification_state = await self.solution_verifier.execute(state)
+        # Simple validation based on findings and confidence
+        all_findings = state.get_all_findings()
+        if not all_findings:
+            return {
+                "approved": False,
+                "confidence": 0.0,
+                "ready_for_developer": False,
+                "recommendation": "REJECT: No findings available"
+            }
         
-        # Extract verification results
-        verification_data = verification_state.verification
-        solution_approved = verification_data.get("delivery_approved", False)
-        confidence = verification_data.get("solution_confidence", 0.0)
+        # Calculate average confidence
+        avg_confidence = sum(f.confidence for f in all_findings) / len(all_findings)
+        solution_approved = avg_confidence >= 0.7
         
         # Generate delivery decision
         delivery_decision = {
             "approved": solution_approved,
-            "confidence": confidence,
-            "ready_for_developer": solution_approved and confidence >= 0.8,
+            "confidence": avg_confidence,
+            "ready_for_developer": solution_approved and avg_confidence >= 0.8,
             "recommendation": ""
         }
         
@@ -279,3 +316,139 @@ class DeveloperQueryOrchestrator(BaseAgent):
             delivery_decision["recommendation"] = "REJECT: Solution does not meet minimum requirements"
             
         return delivery_decision
+        
+    async def _check_cache(self, state: AgentState) -> Optional[Dict[str, Any]]:
+        """Check for cached results for the current query."""
+        try:
+            query = state.query.get("original", "")
+            repository_id = state.repository.get("id") or state.repository.get("path", "")
+            options = state.query.get("options", {})
+            
+            if not query or not repository_id:
+                return None
+                
+            cached_result = await cache_manager.get_cached_result(
+                query=query,
+                repository_id=repository_id,
+                options=options
+            )
+            
+            return cached_result
+            
+        except Exception as e:
+            logger.error(f"Cache check failed: {str(e)}")
+            return None
+            
+    async def _apply_cached_result(
+        self, 
+        state: AgentState, 
+        cached_result: Dict[str, Any]
+    ) -> AgentState:
+        """Apply cached result to the current state."""
+        try:
+            result_data = cached_result.get("result_data", {})
+            
+            # Apply cached findings
+            if "findings" in result_data:
+                for agent_name, findings in result_data["findings"].items():
+                    for finding_data in findings:
+                        # Reconstruct finding object
+                        finding = self._create_finding(
+                            finding_type=finding_data.get("finding_type", "cached"),
+                            content=finding_data.get("content", ""),
+                            confidence=finding_data.get("confidence", 0.0),
+                            metadata=finding_data.get("metadata", {}),
+                            citations=finding_data.get("citations", [])
+                        )
+                        # Set agent_name for the finding
+                        finding.agent_name = agent_name
+                        state.add_finding(agent_name, finding)
+            
+            # Apply cached analysis data
+            if "analysis" in result_data:
+                for key, value in result_data["analysis"].items():
+                    state.analysis[key] = value
+                    
+            # Apply cached verification data
+            if "verification" in result_data:
+                for key, value in result_data["verification"].items():
+                    state.verification[key] = value
+                    
+            # Mark as cached result
+            state.analysis["from_cache"] = True
+            state.analysis["cache_timestamp"] = cached_result.get("created_at")
+            state.verification["cache_confidence"] = cached_result.get("confidence_score", 0.0)
+            
+            return state
+            
+        except Exception as e:
+            logger.error(f"Failed to apply cached result: {str(e)}")
+            return state
+            
+    async def store_final_result(self, state: AgentState) -> bool:
+        """Store the final verified result in cache."""
+        try:
+            query = state.query.get("original", "")
+            repository_id = state.repository.get("id") or state.repository.get("path", "")
+            options = state.query.get("options", {})
+            
+            if not query or not repository_id:
+                return False
+                
+            # Calculate overall confidence
+            all_findings = state.get_all_findings()
+            if not all_findings:
+                return False
+                
+            overall_confidence = state.verification.get(
+                "overall_confidence",
+                sum(f.confidence for f in all_findings) / len(all_findings)
+            )
+            
+            # Prepare result data for caching
+            result_data = {
+                "findings": {},
+                "analysis": state.analysis,
+                "verification": state.verification,
+                "query_metadata": {
+                    "session_id": state.session_id,
+                    "execution_time": state.progress.get("execution_time"),
+                    "agent_count": len(state.agent_results)
+                }
+            }
+            
+            # Serialize findings by agent
+            for agent_name, findings in state.agent_results.items():
+                result_data["findings"][agent_name] = [
+                    {
+                        "finding_type": f.finding_type,
+                        "content": f.content,
+                        "confidence": f.confidence,
+                        "metadata": f.metadata,
+                        "citations": f.citations
+                    }
+                    for f in findings
+                ]
+            
+            # Check if result should be cached
+            if not await cache_manager.should_cache_result(overall_confidence, result_data):
+                logger.debug("Result not suitable for caching", confidence=overall_confidence)
+                return False
+                
+            # Store in cache
+            success = await cache_manager.store_result(
+                query=query,
+                repository_id=repository_id,
+                result_data=result_data,
+                confidence_score=overall_confidence,
+                options=options
+            )
+            
+            if success:
+                logger.info("Final result stored in cache", confidence=overall_confidence)
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"Failed to store final result: {str(e)}")
+            return False

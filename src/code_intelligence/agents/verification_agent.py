@@ -102,7 +102,7 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
         self.uncertainty_detection_template = uncertainty_detection_template
         
     async def execute(self, state: AgentState) -> AgentState:
-        """Execute INDEPENDENT verification logic against actual repository data."""
+        """Execute SOLUTION-LEVEL verification with 90% confidence threshold."""
         self._log_execution_start(state)
         
         if not self._validate_state(state):
@@ -131,16 +131,22 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
             solution_available = self._check_solution_availability(all_findings)
             
             if solution_available:
-                # Perform solution-level validation
+                # ENHANCED: Perform solution-level validation with developer requirements
                 solution_validation = await self._validate_complete_solution(all_findings, git_repo, repository_path, state)
                 
                 # QUALITY GATE: 90% confidence threshold for solutions (Requirement 3.5)
                 if solution_validation["confidence"] >= 0.9:
                     validation_status = "SOLUTION_APPROVED"
-                    validation_message = f"✅ Solution validated with {solution_validation['confidence']:.1%} confidence"
+                    validation_message = f"✅ SOLUTION APPROVED FOR DELIVERY\n"
+                    validation_message += f"Confidence: {solution_validation['confidence']:.1%} (exceeds 90% threshold)\n"
+                    validation_message += f"Requirements Met: {solution_validation['requirements_met_count']}/{solution_validation['total_requirements']}\n"
+                    validation_message += f"Developer can proceed with implementation."
                 else:
                     validation_status = "SOLUTION_NEEDS_REVIEW"
-                    validation_message = f"⚠️ Solution needs review - {solution_validation['confidence']:.1%} confidence (below 90% threshold)"
+                    validation_message = f"⚠️ SOLUTION NEEDS MORE INVESTIGATION\n"
+                    validation_message += f"Confidence: {solution_validation['confidence']:.1%} (below 90% threshold)\n"
+                    validation_message += f"Missing: {', '.join(solution_validation.get('missing_elements', []))}\n"
+                    validation_message += f"Recommendation: Gather more data before delivery."
                     
                 # Create solution validation finding
                 solution_finding = self._create_finding(
@@ -151,10 +157,21 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
                     metadata={
                         "validation_status": validation_status,
                         "validation_details": solution_validation,
-                        "threshold_met": solution_validation["confidence"] >= 0.9
+                        "threshold_met": solution_validation["confidence"] >= 0.9,
+                        "delivery_approved": solution_validation["confidence"] >= 0.9,
+                        "solution_type": "complete_solution"
                     }
                 )
                 state.add_finding(self.config.name, solution_finding)
+                
+                # Update state with solution-level verification
+                state.verification.update({
+                    "solution_confidence": solution_validation["confidence"],
+                    "delivery_approved": solution_validation["confidence"] >= 0.9,
+                    "requirements_met": solution_validation.get("requirements_validation", {}),
+                    "missing_elements": solution_validation.get("missing_elements", []),
+                    "quality_gate": "PASSED" if solution_validation["confidence"] >= 0.9 else "FAILED"
+                })
                 
             else:
                 # Fallback to individual finding validation
@@ -217,6 +234,9 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
                 state.verification["quality_gate_passed"] = False
                 state.verification["ready_for_user"] = False
             
+            # Detect and flag uncertainties
+            uncertainties = await self._detect_uncertainties(all_findings, git_repo, repository_path)
+            
             # Add uncertainty findings
             for uncertainty in uncertainties:
                 uncertainty_finding = self._create_finding(
@@ -229,12 +249,19 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
                 state.add_finding(self.config.name, uncertainty_finding)
                 
             # Update state verification data
-            state.verification.update({
-                "validation_results": validation_results,
-                "verification_summary": verification_summary,
-                "uncertainties": uncertainties,
-                "overall_confidence": verification_summary['average_confidence']
-            })
+            if solution_available:
+                state.verification.update({
+                    "solution_validation": solution_validation,
+                    "uncertainties": uncertainties,
+                    "overall_confidence": solution_validation["confidence"]
+                })
+            else:
+                state.verification.update({
+                    "validation_results": validation_results,
+                    "verification_summary": verification_summary,
+                    "uncertainties": uncertainties,
+                    "overall_confidence": verification_summary['average_confidence']
+                })
             
             self._log_execution_end(state, True)
             return state
@@ -1680,6 +1707,476 @@ Focus on detecting and flagging uncertainties rather than making definitive judg
             return os.path.exists(git_dir) and (os.path.isdir(git_dir) or os.path.isfile(git_dir))
         except Exception:
             return False
+    
+    def _check_solution_availability(self, all_findings: List[AgentFinding]) -> bool:
+        """Check if we have a complete solution that can be validated."""
+        # Look for key solution components
+        has_working_code = False
+        has_integration_analysis = False
+        has_synthesis = False
+        
+        for finding in all_findings:
+            if finding.finding_type == "working_code_extraction":
+                has_working_code = True
+            elif finding.finding_type == "integration_analysis":
+                has_integration_analysis = True
+            elif finding.finding_type == "comprehensive_synthesis":
+                has_synthesis = True
+                
+        # We have a solution if we have synthesis and either working code or integration analysis
+        return has_synthesis and (has_working_code or has_integration_analysis)
+    
+    async def _validate_complete_solution(
+        self, 
+        all_findings: List[AgentFinding], 
+        git_repo: Optional[GitRepository],
+        repository_path: str,
+        state: AgentState
+    ) -> Dict[str, Any]:
+        """Validate complete solution against developer requirements."""
+        
+        solution_validation = {
+            "confidence": 0.0,
+            "requirements_met_count": 0,
+            "total_requirements": 0,
+            "missing_elements": [],
+            "citations": [],
+            "requirements_validation": {},
+            "solution_components": {}
+        }
+        
+        try:
+            # Extract developer requirements from original query
+            original_query = state.query.get("original", "").lower()
+            developer_requirements = self._extract_developer_requirements(original_query)
+            solution_validation["total_requirements"] = len(developer_requirements)
+            
+            # Validate each requirement
+            for requirement in developer_requirements:
+                is_met = await self._validate_requirement(requirement, all_findings, git_repo, repository_path)
+                solution_validation["requirements_validation"][requirement] = is_met
+                if is_met:
+                    solution_validation["requirements_met_count"] += 1
+                else:
+                    solution_validation["missing_elements"].append(requirement)
+            
+            # Validate solution components
+            solution_components = await self._validate_solution_components(all_findings, git_repo, repository_path)
+            solution_validation["solution_components"] = solution_components
+            
+            # Calculate overall confidence
+            requirements_score = solution_validation["requirements_met_count"] / max(solution_validation["total_requirements"], 1)
+            components_score = solution_components.get("overall_score", 0.0)
+            
+            # Weighted average: 70% requirements, 30% components
+            solution_validation["confidence"] = (requirements_score * 0.7) + (components_score * 0.3)
+            
+            # Add citations from validated components
+            for component_name, component_data in solution_components.items():
+                if isinstance(component_data, dict) and component_data.get("citations"):
+                    solution_validation["citations"].extend(component_data["citations"])
+            
+        except Exception as e:
+            self.logger.error(f"Solution validation failed: {str(e)}")
+            solution_validation["confidence"] = 0.0
+            solution_validation["missing_elements"].append(f"validation_error: {str(e)}")
+        
+        return solution_validation
+    
+    def _extract_developer_requirements(self, query: str) -> List[str]:
+        """Extract specific requirements from developer query."""
+        requirements = []
+        
+        # Common developer requirements patterns
+        if "working" in query or "code" in query:
+            requirements.append("working_code")
+        if "version" in query or "commit" in query:
+            requirements.append("version_identification")
+        if "dependencies" in query or "depend" in query:
+            requirements.append("dependency_analysis")
+        if "integration" in query or "integrate" in query:
+            requirements.append("integration_steps")
+        if "fix" in query or "broken" in query:
+            requirements.append("problem_resolution")
+        
+        # Default requirements for any developer query
+        if not requirements:
+            requirements = ["working_code", "version_identification", "integration_steps"]
+            
+        return requirements
+    
+    async def _validate_requirement(
+        self, 
+        requirement: str, 
+        all_findings: List[AgentFinding],
+        git_repo: Optional[GitRepository],
+        repository_path: str
+    ) -> bool:
+        """Validate a specific developer requirement."""
+        
+        try:
+            if requirement == "working_code":
+                return self._has_working_code_extraction(all_findings)
+            elif requirement == "version_identification":
+                return self._has_version_identification(all_findings)
+            elif requirement == "dependency_analysis":
+                return self._has_dependency_analysis(all_findings)
+            elif requirement == "integration_steps":
+                return self._has_integration_steps(all_findings)
+            elif requirement == "problem_resolution":
+                return self._has_problem_resolution(all_findings)
+            else:
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Requirement validation failed for {requirement}: {str(e)}")
+            return False
+    
+    def _has_working_code_extraction(self, all_findings: List[AgentFinding]) -> bool:
+        """Check if working code was extracted."""
+        for finding in all_findings:
+            if finding.finding_type == "working_code_extraction":
+                # Verify it has actual code content
+                code_content = finding.metadata.get("code_content", "")
+                return len(code_content) > 50  # Reasonable code length
+        return False
+    
+    def _has_version_identification(self, all_findings: List[AgentFinding]) -> bool:
+        """Check if a specific version/commit was identified."""
+        for finding in all_findings:
+            if "commit" in finding.content.lower() or "version" in finding.content.lower():
+                # Look for commit SHA pattern
+                import re
+                if re.search(r'[a-f0-9]{7,40}', finding.content):
+                    return True
+        return False
+    
+    def _has_dependency_analysis(self, all_findings: List[AgentFinding]) -> bool:
+        """Check if dependencies were analyzed."""
+        for finding in all_findings:
+            if finding.finding_type == "integration_analysis":
+                dependencies = finding.metadata.get("dependencies", [])
+                return len(dependencies) > 0
+        return False
+    
+    def _has_integration_steps(self, all_findings: List[AgentFinding]) -> bool:
+        """Check if integration steps were provided."""
+        for finding in all_findings:
+            if finding.finding_type == "integration_analysis":
+                steps = finding.metadata.get("integration_steps", [])
+                return len(steps) > 0
+        return False
+    
+    def _has_problem_resolution(self, all_findings: List[AgentFinding]) -> bool:
+        """Check if the problem was addressed."""
+        for finding in all_findings:
+            if "fix" in finding.content.lower() or "solution" in finding.content.lower():
+                return True
+        return False
+    
+    async def _validate_solution_components(
+        self, 
+        all_findings: List[AgentFinding],
+        git_repo: Optional[GitRepository],
+        repository_path: str
+    ) -> Dict[str, Any]:
+        """Validate individual solution components."""
+        
+        components = {
+            "working_code": {"score": 0.0, "validated": False, "citations": []},
+            "integration_analysis": {"score": 0.0, "validated": False, "citations": []},
+            "synthesis": {"score": 0.0, "validated": False, "citations": []},
+            "overall_score": 0.0
+        }
+        
+        try:
+            # Validate working code component
+            working_code_finding = next(
+                (f for f in all_findings if f.finding_type == "working_code_extraction"), 
+                None
+            )
+            if working_code_finding:
+                components["working_code"] = await self._validate_working_code_component(
+                    working_code_finding, git_repo, repository_path
+                )
+            
+            # Validate integration analysis component
+            integration_finding = next(
+                (f for f in all_findings if f.finding_type == "integration_analysis"), 
+                None
+            )
+            if integration_finding:
+                components["integration_analysis"] = await self._validate_integration_component(
+                    integration_finding, repository_path
+                )
+            
+            # Validate synthesis component
+            synthesis_finding = next(
+                (f for f in all_findings if f.finding_type == "comprehensive_synthesis"), 
+                None
+            )
+            if synthesis_finding:
+                components["synthesis"] = await self._validate_synthesis_component(synthesis_finding)
+            
+            # Calculate overall score
+            valid_components = [c for c in components.values() if isinstance(c, dict) and c.get("validated")]
+            if valid_components:
+                components["overall_score"] = sum(c["score"] for c in valid_components) / len(valid_components)
+            
+        except Exception as e:
+            self.logger.error(f"Component validation failed: {str(e)}")
+            components["overall_score"] = 0.0
+        
+        return components
+    
+    async def _validate_working_code_component(
+        self, 
+        finding: AgentFinding,
+        git_repo: Optional[GitRepository],
+        repository_path: str
+    ) -> Dict[str, Any]:
+        """Validate working code extraction component."""
+        
+        component = {"score": 0.0, "validated": False, "citations": [], "issues": []}
+        
+        try:
+            commit_sha = finding.metadata.get("commit_sha")
+            file_path = finding.metadata.get("file_path")
+            code_content = finding.metadata.get("code_content", "")
+            
+            score = 0.0
+            
+            # Check if commit exists (30% of score)
+            if commit_sha and git_repo:
+                try:
+                    commit_info = git_repo.get_commit_info(commit_sha)
+                    if commit_info:
+                        score += 0.3
+                        component["citations"].append(self._create_citation(
+                            file_path="git_history",
+                            description=f"Verified commit {commit_sha[:8]} exists",
+                            commit_sha=commit_sha
+                        ))
+                    else:
+                        component["issues"].append(f"Commit {commit_sha} not found")
+                except Exception as e:
+                    component["issues"].append(f"Commit validation failed: {str(e)}")
+            
+            # Check if file exists at commit (30% of score)
+            if file_path and commit_sha and git_repo:
+                try:
+                    # Use git show to verify file exists at commit
+                    import subprocess
+                    cmd = ["git", "show", f"{commit_sha}:{file_path}"]
+                    result = subprocess.run(
+                        cmd, cwd=repository_path, capture_output=True, text=True, timeout=5
+                    )
+                    if result.returncode == 0:
+                        score += 0.3
+                        component["citations"].append(self._create_citation(
+                            file_path=file_path,
+                            description=f"Verified file exists at commit {commit_sha[:8]}",
+                            commit_sha=commit_sha
+                        ))
+                    else:
+                        component["issues"].append(f"File {file_path} not found at commit {commit_sha}")
+                except Exception as e:
+                    component["issues"].append(f"File validation failed: {str(e)}")
+            
+            # Check code content quality (40% of score)
+            if code_content:
+                if len(code_content) > 100:  # Reasonable code length
+                    score += 0.2
+                if any(keyword in code_content.lower() for keyword in ["function", "class", "def", "public", "private"]):
+                    score += 0.1  # Contains code keywords
+                if code_content.count('\n') > 5:  # Multi-line code
+                    score += 0.1
+            else:
+                component["issues"].append("No code content provided")
+            
+            component["score"] = score
+            component["validated"] = score >= 0.6  # 60% threshold for component validation
+            
+        except Exception as e:
+            component["issues"].append(f"Working code validation error: {str(e)}")
+            component["score"] = 0.0
+        
+        return component
+    
+    async def _validate_integration_component(
+        self, 
+        finding: AgentFinding,
+        repository_path: str
+    ) -> Dict[str, Any]:
+        """Validate integration analysis component."""
+        
+        component = {"score": 0.0, "validated": False, "citations": [], "issues": []}
+        
+        try:
+            dependencies = finding.metadata.get("dependencies", [])
+            integration_steps = finding.metadata.get("integration_steps", [])
+            compatibility = finding.metadata.get("compatibility", [])
+            
+            score = 0.0
+            
+            # Check dependencies analysis (40% of score)
+            if dependencies:
+                score += 0.2  # Has dependencies
+                if len(dependencies) > 0:
+                    score += 0.2  # Reasonable number of dependencies
+            else:
+                component["issues"].append("No dependencies analyzed")
+            
+            # Check integration steps (40% of score)
+            if integration_steps:
+                if 2 <= len(integration_steps) <= 10:  # Reasonable number of steps
+                    score += 0.4
+                else:
+                    score += 0.2  # Has steps but unreasonable count
+                    component["issues"].append(f"Unusual number of integration steps: {len(integration_steps)}")
+            else:
+                component["issues"].append("No integration steps provided")
+            
+            # Check compatibility analysis (20% of score)
+            if compatibility:
+                compatible_count = len([c for c in compatibility if c.get("compatible", False)])
+                if compatible_count > 0:
+                    score += 0.2
+            
+            component["score"] = score
+            component["validated"] = score >= 0.6  # 60% threshold
+            
+        except Exception as e:
+            component["issues"].append(f"Integration validation error: {str(e)}")
+            component["score"] = 0.0
+        
+        return component
+    
+    async def _validate_synthesis_component(self, finding: AgentFinding) -> Dict[str, Any]:
+        """Validate synthesis component."""
+        
+        component = {"score": 0.0, "validated": False, "citations": [], "issues": []}
+        
+        try:
+            content = finding.content
+            confidence = finding.confidence
+            
+            score = 0.0
+            
+            # Check content quality (50% of score)
+            if len(content) > 200:  # Substantial content
+                score += 0.2
+            if "solution" in content.lower():
+                score += 0.1
+            if "step" in content.lower():
+                score += 0.1
+            if any(word in content.lower() for word in ["commit", "version", "code"]):
+                score += 0.1
+            
+            # Check confidence level (30% of score)
+            if confidence >= 0.8:
+                score += 0.3
+            elif confidence >= 0.6:
+                score += 0.2
+            elif confidence >= 0.4:
+                score += 0.1
+            
+            # Check citations (20% of score)
+            if finding.citations:
+                score += 0.2
+            
+            component["score"] = score
+            component["validated"] = score >= 0.6  # 60% threshold
+            
+        except Exception as e:
+            component["issues"].append(f"Synthesis validation error: {str(e)}")
+            component["score"] = 0.0
+        
+        return component
+    
+    async def _detect_uncertainties(
+        self, 
+        all_findings: List[AgentFinding],
+        git_repo: Optional[GitRepository],
+        repository_path: str
+    ) -> List[Dict[str, Any]]:
+        """Detect and flag uncertainties in findings."""
+        
+        uncertainties = []
+        
+        try:
+            # Check for low confidence findings
+            low_confidence_findings = [f for f in all_findings if f.confidence < 0.7]
+            if low_confidence_findings:
+                uncertainties.append({
+                    "type": "low_confidence",
+                    "description": f"Found {len(low_confidence_findings)} findings with confidence below 70%",
+                    "confidence": 0.3,
+                    "affected_agents": list(set(f.agent_name for f in low_confidence_findings))
+                })
+            
+            # Check for conflicting findings
+            conflicts = self._detect_finding_conflicts(all_findings)
+            if conflicts:
+                uncertainties.append({
+                    "type": "conflicting_findings",
+                    "description": f"Detected {len(conflicts)} potential conflicts between agent findings",
+                    "confidence": 0.4,
+                    "conflicts": conflicts
+                })
+            
+            # Check for missing critical information
+            missing_info = self._detect_missing_information(all_findings)
+            if missing_info:
+                uncertainties.append({
+                    "type": "missing_information",
+                    "description": f"Missing critical information: {', '.join(missing_info)}",
+                    "confidence": 0.2,
+                    "missing_items": missing_info
+                })
+            
+        except Exception as e:
+            self.logger.error(f"Uncertainty detection failed: {str(e)}")
+            uncertainties.append({
+                "type": "detection_error",
+                "description": f"Failed to detect uncertainties: {str(e)}",
+                "confidence": 0.1
+            })
+        
+        return uncertainties
+    
+    def _detect_finding_conflicts(self, all_findings: List[AgentFinding]) -> List[Dict[str, Any]]:
+        """Detect conflicts between findings."""
+        conflicts = []
+        
+        # Simple conflict detection based on confidence differences
+        for i, finding1 in enumerate(all_findings):
+            for finding2 in all_findings[i+1:]:
+                if (finding1.finding_type == finding2.finding_type and 
+                    abs(finding1.confidence - finding2.confidence) > 0.3):
+                    conflicts.append({
+                        "agents": [finding1.agent_name, finding2.agent_name],
+                        "type": finding1.finding_type,
+                        "confidence_diff": abs(finding1.confidence - finding2.confidence)
+                    })
+        
+        return conflicts
+    
+    def _detect_missing_information(self, all_findings: List[AgentFinding]) -> List[str]:
+        """Detect missing critical information."""
+        missing = []
+        
+        # Check for essential finding types
+        finding_types = set(f.finding_type for f in all_findings)
+        
+        if "working_code_extraction" not in finding_types:
+            missing.append("working_code")
+        if "comprehensive_synthesis" not in finding_types:
+            missing.append("synthesis")
+        if not any("temporal" in ft for ft in finding_types):
+            missing.append("temporal_analysis")
+        
+        return missing
             
     def _is_safe_path(self, file_path: str, repository_path: str) -> bool:
         """Check if the file path is safe and doesn't contain path traversal."""
