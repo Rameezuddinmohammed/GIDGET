@@ -101,6 +101,44 @@ class LLMConfig(BaseSettings):
         return self
 
 
+class SemanticSearchConfig(BaseSettings):
+    """Semantic search configuration settings."""
+    
+    # Embedding Model Configuration
+    embedding_model: str = Field(default="microsoft/codebert-base", alias="EMBEDDING_MODEL")
+    embedding_device: str = Field(default="auto", alias="EMBEDDING_DEVICE")  # auto, cpu, cuda
+    max_sequence_length: int = Field(default=512, alias="MAX_SEQUENCE_LENGTH")
+    embedding_batch_size: int = Field(default=32, alias="EMBEDDING_BATCH_SIZE")
+    
+    # Vector Search Configuration
+    similarity_threshold: float = Field(default=0.7, alias="SIMILARITY_THRESHOLD", ge=0.0, le=1.0)
+    max_search_results: int = Field(default=10, alias="MAX_SEARCH_RESULTS", gt=0, le=100)
+    vector_index_lists: int = Field(default=100, alias="VECTOR_INDEX_LISTS", gt=0)
+    
+    # Hybrid Search Configuration
+    semantic_weight: float = Field(default=0.6, alias="SEMANTIC_WEIGHT", ge=0.0, le=1.0)
+    structural_weight: float = Field(default=0.4, alias="STRUCTURAL_WEIGHT", ge=0.0, le=1.0)
+    
+    # Performance Configuration
+    embedding_cache_ttl: int = Field(default=7200, alias="EMBEDDING_CACHE_TTL", gt=0)
+    max_embedding_workers: int = Field(default=4, alias="MAX_EMBEDDING_WORKERS", gt=0, le=16)
+    
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=False
+    )
+    
+    @model_validator(mode='after')
+    def validate_weights(self):
+        """Validate that semantic and structural weights sum to 1.0."""
+        total_weight = self.semantic_weight + self.structural_weight
+        if abs(total_weight - 1.0) > 0.01:  # Allow small floating point errors
+            raise ValueError("Semantic and structural weights must sum to 1.0")
+        return self
+
+
 class AppConfig(BaseSettings):
     """Application configuration settings."""
     
@@ -139,6 +177,7 @@ class Config:
         self.database = DatabaseConfig()
         self.app = AppConfig()
         self.llm = LLMConfig()
+        self.semantic = SemanticSearchConfig()
     
     @classmethod
     def load(cls) -> "Config":

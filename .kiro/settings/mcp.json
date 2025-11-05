@@ -1,0 +1,18 @@
+﻿{
+  "mcpServers": {
+    "supabase": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://mcp.supabase.com/mcp?project_ref=kysvqaszglwdtjsxcyfd"
+      ],
+      "disabled": false,
+      "autoApprove": [
+        "execute_sql",
+        "list_tables",
+        "apply_migration",
+        "get_logs"
+      ]
+    }
+  }
+}

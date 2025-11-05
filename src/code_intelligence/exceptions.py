@@ -117,3 +117,18 @@ class ValidationError(CodeIntelligenceError):
 class VerificationError(CodeIntelligenceError):
     """Verification and validation errors."""
     pass
+
+
+class EmbeddingError(CodeIntelligenceError):
+    """Exception raised for embedding generation errors."""
+    pass
+
+
+class VectorStorageError(CodeIntelligenceError):
+    """Exception raised for vector storage operations."""
+    pass
+
+
+class SearchError(CodeIntelligenceError):
+    """Exception raised for search operations."""
+    pass
