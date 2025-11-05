@@ -19,6 +19,22 @@ class SupabaseClient:
     
     def __init__(self) -> None:
         self._client: Optional[Client] = None
+        self._initialized = False
+    
+    async def initialize(self) -> None:
+        """Initialize the Supabase client and connection."""
+        if self._initialized:
+            return
+        
+        try:
+            self.connect()
+            # Test the connection
+            await self.health_check()
+            self._initialized = True
+            logger.info("Supabase client initialized successfully")
+        except Exception as e:
+            logger.error("Failed to initialize Supabase client", error=str(e))
+            raise SupabaseError(f"Failed to initialize Supabase client: {e}")
     
     def connect(self) -> None:
         """Establish connection to Supabase."""
@@ -46,6 +62,16 @@ class SupabaseClient:
         if not self._client:
             self.connect()
         return self._client
+    
+    async def health_check(self) -> bool:
+        """Check if the Supabase connection is healthy."""
+        try:
+            # Simple query to test connection
+            result = await self._execute_sql("SELECT 1 as health_check")
+            return result is not None
+        except Exception as e:
+            logger.error("Supabase health check failed", error=str(e))
+            return False
     
     async def create_tables(self) -> None:
         """Create all required tables for the system."""

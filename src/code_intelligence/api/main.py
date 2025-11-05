@@ -1,10 +1,13 @@
 """Main FastAPI application for the Code Intelligence System."""
 
+import json
 from contextlib import asynccontextmanager
+from datetime import datetime
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 import structlog
 
 from .routes import queries_router, repositories_router, users_router, health_router
@@ -75,17 +78,39 @@ app.add_middleware(
 )
 
 
+# Custom JSON encoder for datetime objects
+class CustomJSONResponse(JSONResponse):
+    """Custom JSON response with datetime serialization support."""
+    
+    def render(self, content) -> bytes:
+        return json.dumps(
+            content,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+            default=self._json_serializer
+        ).encode("utf-8")
+    
+    def _json_serializer(self, obj):
+        """Custom JSON serializer for non-serializable objects."""
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        raise TypeError(f"Object of type {obj.__class__.__name__} is not JSON serializable")
+
+
 # Exception handlers
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Handle HTTP exceptions."""
-    return JSONResponse(
+    error_response = ErrorResponse(
+        error=exc.__class__.__name__,
+        message=exc.detail,
+        details={"status_code": exc.status_code}
+    )
+    return CustomJSONResponse(
         status_code=exc.status_code,
-        content=ErrorResponse(
-            error=exc.__class__.__name__,
-            message=exc.detail,
-            details={"status_code": exc.status_code}
-        ).model_dump()
+        content=jsonable_encoder(error_response)
     )
 
 
@@ -98,13 +123,14 @@ async def general_exception_handler(request: Request, exc: Exception):
         "exception_type": exc.__class__.__name__
     })
     
-    return JSONResponse(
+    error_response = ErrorResponse(
+        error="InternalServerError",
+        message="An internal server error occurred",
+        details={"exception_type": exc.__class__.__name__}
+    )
+    return CustomJSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content=ErrorResponse(
-            error="InternalServerError",
-            message="An internal server error occurred",
-            details={"exception_type": exc.__class__.__name__}
-        ).model_dump()
+        content=jsonable_encoder(error_response)
     )
 
 

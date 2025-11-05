@@ -81,6 +81,7 @@ async def demo_specialized_agents():
             }
             '''
     
+    # Use the async mock function directly
     agents["orchestrator"]._call_llm = mock_llm_orchestrator
     
     try:
@@ -159,6 +160,7 @@ async def demo_specialized_agents():
         }
         '''
     
+    # Use the async mock function directly
     agents["historian"]._call_llm = mock_llm_historian
     
     # Mock git repository operations
@@ -256,6 +258,7 @@ async def demo_specialized_agents():
         High confidence (0.85) in findings based on strong historical evidence and structural analysis.
         '''
     
+    # Use the async mock function directly
     agents["synthesizer"]._call_llm = mock_llm_synthesizer
     
     try:
