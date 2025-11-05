@@ -214,6 +214,8 @@
 
 
 
+
+
   - Create code embedding generation pipeline using specialized models
   - Build vector storage and similarity search using pgvector
   - Implement hybrid search combining vector similarity with graph queries
@@ -223,11 +225,13 @@
 - [x] 5.1 Build code embedding generation pipeline
 
 
+
   - Integrate code-specialized embedding models (e.g., CodeBERT, GraphCodeBERT)
   - Create embedding generation for functions, classes, and code blocks
   - Implement batch processing for large codebases
   - Build embedding quality validation and consistency checking
   - _Requirements: 4.1, 4.2_
+
 
 - [x] 5.2 Create vector storage and similarity search system
 
@@ -238,6 +242,7 @@
   - Implement search result ranking and relevance scoring
   - _Requirements: 4.1, 4.3_
 
+
 - [x] 5.3 Implement hybrid search combining vectors and graph queries
 
 
@@ -245,6 +250,7 @@
   - Build result fusion algorithms for multi-modal search results
   - Implement context-aware search with graph relationship weighting
   - Create search explanation and result justification capabilities
+
   - _Requirements: 4.1, 4.3, 4.4_
 
 - [x] 5.4 Build semantic search system tests

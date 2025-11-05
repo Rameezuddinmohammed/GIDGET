@@ -193,10 +193,11 @@ class TestVectorStorage:
             from src.code_intelligence.database.supabase_client import SupabaseClient
             supabase_client = SupabaseClient()
             
+            repo_id = sample_embedding.element.metadata["repository_id"]
             repo_data = {
-                "id": sample_embedding.element.metadata["repository_id"],
-                "name": "test_repository",
-                "url": "https://github.com/test/repo",
+                "id": repo_id,
+                "name": f"test_repository_{repo_id[:8]}",
+                "url": f"https://github.com/test/repo_{repo_id[:8]}",
                 "description": "Test repository",
                 "language": "python"
             }
@@ -251,8 +252,8 @@ class TestVectorStorage:
             
             repo_data = {
                 "id": test_repo_id,
-                "name": "test_repository",
-                "url": "https://github.com/test/repo",
+                "name": f"test_repository_{test_repo_id[:8]}",
+                "url": f"https://github.com/test/repo_{test_repo_id[:8]}",
                 "description": "Test repository",
                 "language": "python"
             }
@@ -404,9 +405,10 @@ class TestSemanticSearchEngine:
         search_engine.search = AsyncMock()
         search_engine.search.return_value = []
         
+        test_repo_id = str(uuid.uuid4())
         results = await search_engine.search_by_code_similarity(
             code_snippet="def add(a, b): return a + b",
-            repository_id="fec538e6-146e-45bb-baaf-c4a9a0ba5815",
+            repository_id=test_repo_id,
             language="python"
         )
         
@@ -419,9 +421,10 @@ class TestSemanticSearchEngine:
         search_engine.search = AsyncMock()
         search_engine.search.return_value = []
         
+        test_repo_id = str(uuid.uuid4())
         results = await search_engine.find_similar_functions(
             function_name="calculate",
-            repository_id="fec538e6-146e-45bb-baaf-c4a9a0ba5815"
+            repository_id=test_repo_id
         )
         
         search_engine.search.assert_called_once()
@@ -448,7 +451,7 @@ class TestHybridSearchEngine:
         """Create a sample search query."""
         return SearchQuery(
             query_text="process data function",
-            repository_id="fec538e6-146e-45bb-baaf-c4a9a0ba5815",
+            repository_id=str(uuid.uuid4()),
             max_results=10,
             similarity_threshold=0.7
         )
@@ -484,9 +487,10 @@ class TestHybridSearchEngine:
             "general": ["process", "data"]
         }
         
+        test_repo_id = str(uuid.uuid4())
         query = hybrid_engine._build_structural_query(
             search_terms=search_terms,
-            repository_id="fec538e6-146e-45bb-baaf-c4a9a0ba5815",
+            repository_id=test_repo_id,
             element_types=[CodeElementType.FUNCTION],
             file_patterns=None,
             limit=10
@@ -568,9 +572,10 @@ class TestSemanticSearchIntegration:
         ]
         integration.semantic_engine.search = AsyncMock(return_value=mock_results)
         
+        test_repo_id = str(uuid.uuid4())
         result = await integration.search_code(
             query_text="test function",
-            repository_id="fec538e6-146e-45bb-baaf-c4a9a0ba5815",
+            repository_id=test_repo_id,
             search_type="semantic"
         )
         
@@ -609,9 +614,10 @@ class TestSemanticSearchIntegration:
         ]
         integration.hybrid_engine.hybrid_search = AsyncMock(return_value=mock_results)
         
+        test_repo_id = str(uuid.uuid4())
         result = await integration.search_code(
             query_text="hybrid function",
-            repository_id="fec538e6-146e-45bb-baaf-c4a9a0ba5815",
+            repository_id=test_repo_id,
             search_type="hybrid"
         )
         
@@ -631,9 +637,10 @@ class TestSemanticSearchIntegration:
         }
         integration.vector_storage.get_embedding_stats = AsyncMock(return_value=mock_stats)
         
-        stats = await integration.get_search_statistics("fec538e6-146e-45bb-baaf-c4a9a0ba5815")
+        test_repo_id = str(uuid.uuid4())
+        stats = await integration.get_search_statistics(test_repo_id)
         
-        assert stats["repository_id"] == "fec538e6-146e-45bb-baaf-c4a9a0ba5815"
+        assert stats["repository_id"] == test_repo_id
         assert "embeddings" in stats
         assert "search_config" in stats
         assert "capabilities" in stats
@@ -665,10 +672,11 @@ class TestPerformance:
             )
             elements.append(element)
         
+        test_repo_id = str(uuid.uuid4())
         batch = EmbeddingBatch(
             elements=elements,
             batch_id="large_batch",
-            repository_id="fec538e6-146e-45bb-baaf-c4a9a0ba5815",
+            repository_id=test_repo_id,
             commit_sha="abc123"
         )
         
@@ -693,10 +701,11 @@ class TestPerformance:
         
         # Create multiple queries
         queries = []
+        test_repo_id = str(uuid.uuid4())
         for i in range(10):
             query = SearchQuery(
                 query_text=f"search query {i}",
-                repository_id="fec538e6-146e-45bb-baaf-c4a9a0ba5815",
+                repository_id=test_repo_id,
                 max_results=5
             )
             queries.append(query)

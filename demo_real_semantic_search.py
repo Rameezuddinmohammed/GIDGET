@@ -39,8 +39,8 @@ async def demo_embedding_storage():
         # Create repository record
         repo_data = {
             "id": DEMO_REPO_ID,
-            "name": "demo_repository",
-            "url": "https://github.com/demo/repo",
+            "name": f"demo_repository_{DEMO_REPO_ID[:8]}",
+            "url": f"https://github.com/demo/repo_{DEMO_REPO_ID[:8]}",
             "description": "Demo repository for semantic search testing",
             "language": "python",
             "created_at": "2025-11-05T00:00:00Z"
